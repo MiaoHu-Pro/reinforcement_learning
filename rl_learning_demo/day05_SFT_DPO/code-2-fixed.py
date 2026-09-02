@@ -59,7 +59,7 @@ class SFTConfig:
     log_path: Path = PROJECT_ROOT / "logs" / "Qwen3-0.6B-SFT-fixed.log"
 
     max_length: int = 2500
-    max_samples: int = 5000
+    max_samples: int = 200_000
     batch_size: int = 2
     gradient_accumulation_steps: int = 8
     epochs: int = 1
