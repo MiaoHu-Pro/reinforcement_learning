@@ -129,6 +129,7 @@ class Agent:
             G = r + self.gamma * G
             _, probs = self.get_action(s)
             log_prob = torch.log(probs)[a]
+            # adding a baseline 5.0
             loss += - (G - 5.0) * log_prob
 
         self.optimizer.zero_grad()

@@ -93,29 +93,66 @@ class Agent:
         action = m.sample().item()
         return action, probs
 
-    def update(self, state, next_state, reward, action_prob, done):
+    def update(self,
+               state, # 𝑆_𝑡
+               next_state, # 𝑆_𝑡+1
+               reward, # 𝑅𝑡
+               action_prob, # 𝜋𝜃(𝐴_𝑡|𝑆_𝑡)
+               done):
 
-        state = torch.tensor(state).unsqueeze(0)
-        next_state = torch.tensor(next_state).unsqueeze(0)
+        state = torch.tensor(state).unsqueeze(0) # 𝑆_𝑡
+        next_state = torch.tensor(next_state).unsqueeze(0) # 𝑆_𝑡+1
 
-        # ① 计算价值网络的损失
-        # td误差δ = R_t + γV(S_(t+1)) - V(S_t)
+        # ① 计算价值网络的损失  self.v的损失：均方差
+        # td误差 δ = R_t + γV(S_(t+1)) - V(S_t)
         # TD target = δ + V(S_t)
+        # 而对于价值函数𝑉𝜔，则通过TD方法，以接近𝑅_𝑡 + 𝛾𝑉𝜔(𝑆_𝑡+1)为目标训练𝑉𝜔(𝑆_𝑡)这个神经网络。
+        # TD目标 = R_t + γV(S_(t+1)) -->  （G_t+1）
+
+        #
+        # Definitions:
+        #
+        #   $$
+        #   y_t = R_t + \gamma (1-d_t)V(S_{t+1})
+        #   $$
+        #
+        #   Here, (y_t) is the TD target.
+        #
+        #   The TD error is:
+        #
+        #   $$
+        #   \delta_t = y_t - V(S_t)
+        #   $$
+        #
+        #   Therefore:
+        #
+        #   $$
+        #   y_t = \delta_t + V(S_t)
+        #   $$
+        #
+        #   So the comment TD target = δ + V(S_t) is mathematically correct.
+
+        # One-step TD target: 𝑅𝑡 + 𝛾𝑉𝜔(𝑆_𝑡+1)
+        # y_t = R_t + gamma * (1 - done) * V(S_{t+1})
         target = reward + self.gamma * self.v(next_state) * (1 - done)
-        target.detach()  # 从计算图剥离，变成一个常数
-        # V(S_t)
-        v = self.v(state)
-        loss_fn = nn.MSELoss()
-        loss_v = loss_fn(v, target)
+        target = target.detach()  # 从计算图剥离，变成一个常数 target = target.detach()
+        # Current value estimate: V(S_t)
+        value = self.v(state) # 𝑉𝜔(𝑆_𝑡)
+        loss_fn = nn.MSELoss()  # (𝑅𝑡 + 𝛾𝑉𝜔(𝑆_𝑡+1) − 𝑉𝜔(𝑆_𝑡))2 → 0
+        # Train the critic so that V(S_t) approaches the TD target y_t
+        loss_v = loss_fn(value, target)
 
         # ② 计算策略网络的损失
-        delta = target - v  # 必须从计算图中剥离出来
-        loss_pi = -torch.log(action_prob) * delta.detach().item()
+        # TD error:
+        # td_error: delta_t = y_t - V(S_t)
+        delta = target - value  # # 𝛿 = 𝑅𝑡 + 𝛾𝑉𝜔(𝑆_𝑡+1) − 𝑉𝜔(𝑆𝑡) 必须从计算图中剥离出来
+        # Actor-Critic loss:  −(𝑅_𝑡 + 𝛾𝑉𝜔(𝑆_𝑡+1) − 𝑉𝜔(𝑆_𝑡)) log 𝜋𝜃(𝐴_𝑡|𝑆_𝑡)
+        loss_pi = -torch.log(action_prob) * delta.detach().item()  #
 
         self.optimizer_pi.zero_grad()
         self.optimizer_v.zero_grad()
-        loss_v.backward()
-        loss_pi.backward()
+        loss_v.backward()  # ∇𝜔(𝑅_𝑡 + 𝛾𝑉𝜔(𝑆_𝑡+1) − 𝑉𝜔(𝑆_𝑡))2
+        loss_pi.backward() # −(𝑅_𝑡 + 𝛾𝑉𝜔(𝑆_𝑡+1) − 𝑉𝜔(𝑆_𝑡))∇𝜃 log 𝜋𝜃(𝐴_𝑡|𝑆_𝑡)
         self.optimizer_pi.step()
         self.optimizer_v.step()
 

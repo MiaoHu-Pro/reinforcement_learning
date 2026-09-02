@@ -10,4 +10,7 @@ dependencies = [
     "matplotlib>=3.11.1",
     "pygame>=2.6.1",
     "torch>=2.7",
+    "transformers[serving]>=5.16.1",
+    "datasets>=5.0.1",
+    "modelscope>=1.39.1",
 ]

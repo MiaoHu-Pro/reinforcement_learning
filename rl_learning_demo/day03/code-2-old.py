@@ -152,6 +152,9 @@ class Agent:
         # torch.log(action_probs): [logπ_θ(a_0|s_0),...,logπ_θ(a_(T-1)|s_(T-1))]
         # (td_target-v).detach():
         # [R_0+γV(S_1)-V(S_0),...,R_(T-1)+γV(S_T)-V(S_(T-1))]
+
+        # -(td_target-v) \log\pi_\theta(A_t|S_t) -->
+        # -(𝑅_𝑡 + 𝛾𝑉𝜔(𝑆_𝑡+1) − 𝑉𝜔(𝑆_𝑡))\log\pi_\theta(A_t|S_t)
         loss_pi = - \
             torch.sum(torch.log(action_probs)
                       * (td_target-v).detach())

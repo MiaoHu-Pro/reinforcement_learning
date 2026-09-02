@@ -123,18 +123,69 @@ class Agent:
         #     log_prob = torch.log(probs)[a]
         #     # 计算损失
         #     loss += -log_prob * G
+
+        # REINFORCE implementation; 逆序计算 G_t
+        #     G_t = R_t + gamma * G_(t+1)
+        #     loss += -G_t * log pi_theta(A_t | S_t)
         G, loss = 0, 0
-        for r, s, a in zip(rewards[::-1], states[::-1], actions[::-1]):
-            # 计算G_t
+        # trajectory:  rewards, states, actions
+        # states  = [S0, S1, S2]
+        # actions = [A0, A1, A2]
+        # rewards = [R0, R1, R2]
+        #
+
+
+        for r, s, a in zip(
+                        rewards[::-1],  # iterate backward, So the order becomes (R_T,S_T,A_T), (R_{T-1},S_{T-1},A_{T-1}),
+                        states[::-1],
+                        actions[::-1]):
+            # This makes calculating (G_t) very convenient because  G_t = R_t+\gamma G_{t+1}
+            ## 计算G_t
             G = r + self.gamma * G
+            # evaluates the policy, probs represents  \pi_\theta(\cdot| S_t).
             _, probs = self.get_action(s)
-            log_prob = torch.log(probs)[a]
-            loss += - G * log_prob
+            log_prob = torch.log(probs)[a] # probs[a]returns pθ(Aₜ | Sₜ), for example 0.7
+            # log_prob = torch.log(probs)[a]  gives log pθ(Aₜ | Sₜ), i.e., log(0.7) = -0.357
+            # Remember: at this stage you have not manually calculated \nabla_\theta\log\pi_\theta(A_t|S_t).
+            loss += - G * log_prob # -G_t\log\pi_\theta(A_t|S_t), SO  L = -\left[G_0\log\pi(A_0|S_0) + G_1\log\pi(A_1|S_1) + G_2\log\pi(A_2|S_2) \right]
 
         self.optimizer.zero_grad()
-        loss.backward()
+        loss.backward() # will calculate the gradient automatically: \nabla_\theta\log\pi_\theta(A_t|S_t)
         self.optimizer.step()
 
+# ============================================================
+# REINFORCE — Mathematical Correspondence
+# ============================================================
+
+# 1. Compute the return from time t:
+#
+#     Gₜ = Rₜ + γ Gₜ₊₁
+#
+
+# 2. Define the REINFORCE loss:
+#
+#     L(θ) = - Σₜ Gₜ log πθ(Aₜ | Sₜ)
+#
+
+# 3. Differentiate the loss with respect to θ:
+#
+#     ∇θ L(θ) = - Σₜ Gₜ ∇θ log πθ(Aₜ | Sₜ)
+#
+
+# 4. Gradient descent:
+#
+#     θ ← θ - α ∇θ L(θ)
+#
+# Because:
+#
+#     ∇θ L(θ) = - Σₜ Gₜ ∇θ log πθ(Aₜ | Sₜ)
+#
+# therefore:
+#
+#     θ ← θ + α Σₜ Gₜ ∇θ log πθ(Aₜ | Sₜ)
+#
+# This is the REINFORCE policy-gradient update.
+# ============================================================
 
 env = gym.make("CartPole-v0")
 agent = Agent()
