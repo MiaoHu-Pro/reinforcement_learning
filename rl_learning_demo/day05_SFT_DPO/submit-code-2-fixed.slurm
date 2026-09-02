@@ -20,6 +20,7 @@ set -euo pipefail
 
 PROJECT_ROOT="${HOME}/scratch/dips_project/reinforcement_learning"
 TRAINING_DIR="${PROJECT_ROOT}/rl_learning_demo/day05_SFT_DPO"
+MODEL_PATH="${HOME}/scratch/llms_model/Qwen3-0.6B"
 CONDA_ENV_NAME="rl_post_training_env"
 
 # Non-interactive Slurm shells do not automatically define `conda activate`.
@@ -51,6 +52,7 @@ echo "Node: $(hostname)"
 echo "Working directory: $(pwd)"
 echo "Conda environment: ${CONDA_DEFAULT_ENV}"
 echo "Python: ${PYTHON_EXECUTABLE}"
+echo "Model: ${MODEL_PATH}"
 "${PYTHON_EXECUTABLE}" --version
 echo "Started: $(date --iso-8601=seconds)"
 
@@ -59,12 +61,20 @@ if [[ "${CONDA_DEFAULT_ENV}" != "${CONDA_ENV_NAME}" ]]; then
     exit 1
 fi
 
+if [[ ! -d "${MODEL_PATH}" ]]; then
+    echo "Model directory not found: ${MODEL_PATH}" >&2
+    exit 1
+fi
+
 # Record the assigned GPU and its available memory in the Slurm output file.
 nvidia-smi
 
 # srun launches the training process inside the resources allocated by sbatch.
-# code-2-fixed.py defaults to 5,000 samples, batch size 2, and one epoch.
-srun "${PYTHON_EXECUTABLE}" code-2-fixed.py --device cuda
+# code-2-fixed.py currently defaults to 200,000 samples, batch size 2,
+# and one epoch.
+srun "${PYTHON_EXECUTABLE}" code-2-fixed.py \
+    --model-path "${MODEL_PATH}" \
+    --device cuda
 
 echo "Finished: $(date --iso-8601=seconds)"
 

@@ -47,13 +47,13 @@ class SFTConfig:
     """All important experiment settings in one visible place."""
 
     model_path: Path = Path(
-        "~/scratch/llms_model/Qwen3-0.6B-Base"
+        "~/scratch/llms_model/Qwen3-0.6B"
     ).expanduser()
     data_dir: Path = PROJECT_ROOT / "data" / "ultrachat_200k" / "data"
     output_dir: Path = (
         Path("~/scratch/llms_model/post_trained_models/")
         .expanduser()
-        / "Qwen3-0.6B-Base-SFT-fixed"
+        / "Qwen3-0.6B-SFT-fixed"
     )
     cache_dir: Path = Path("/tmp/rl-huggingface-cache")
     log_path: Path = PROJECT_ROOT / "logs" / "Qwen3-0.6B-SFT-fixed.log"
