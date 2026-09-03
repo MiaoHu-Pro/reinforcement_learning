@@ -108,6 +108,8 @@ print(model.generation_config)
 @dataclass
 class DPOConfig:
     max_length:int = 1700 #根据自身具备的算力条件进行自适应更改
+    # 为chosen/rejected共享的prompt设置独立上限，给回答保留token空间。
+    max_prompt_length:int = 1024
     batch_size:int = 2
     gradient_accumulation_steps:int = 8
     beta:float = 0.5 # β是dpo公式中的超参数
@@ -136,13 +138,11 @@ binarized_data = datasets.load_dataset(
 # 使用全部记录之前先做固定seed的shuffle；这样训练顺序可复现，也减少文件顺序偏差。
 binarized_data = binarized_data.shuffle(seed=42)
 
-def tokenize_and_format(data):
+def tokenize_and_format(data, add_generation_prompt=False):
     encoded = tokenizer.apply_chat_template(
         data,
         tokenize = True,
-        add_generation_prompt = False,
-        truncation = True,
-        max_length = DPOConfig.max_length,
+        add_generation_prompt = add_generation_prompt,
         return_dict = True,
     )
 
@@ -150,44 +150,96 @@ def tokenize_and_format(data):
     # 否则后面的torch.tensor(original_sequence)无法推断dtype。
     return list(encoded["input_ids"])
 
-## 生成偏好数据的input_ids
-chosen_input_ids_list = []
-i = 0
-# 使用train_prefs中的全部偏好对，不再限制为前30000条。
-# number_of_preference_pairs = min(30000, len(binarized_data))
-number_of_preference_pairs = len(binarized_data)
-while i < number_of_preference_pairs:
-    # 复制消息，避免insert()修改datasets对象中的原始chosen数据。
-    preference_row = binarized_data[i]
-    if preference_row['chosen'][:-1] != preference_row['rejected'][:-1]:
-        raise ValueError(f"Preference pair {i} does not share the same prompt")
-    data = [dict(message) for message in preference_row['chosen']]
-    data.insert(
-        0,
-        {"content": "You are a helpful assistant", "role": "system"}
-    )
-    input_ids = tokenize_and_format(data)
-    chosen_input_ids_list.append(input_ids)
-    i += 1
-    if i % 10000 == 0 or i == number_of_preference_pairs:
-        print(f"偏好数据已处理{i}条数据")
-print('-' * 70)
 
-#############################################################################
-## 生成不偏好数据的input_ids
-rejected_input_ids_list = []
-i = 0
-while i < number_of_preference_pairs:
-    data = [dict(message) for message in binarized_data[i]['rejected']]
-    data.insert(
-        0,
-        {"content": "You are a helpful assistant", "role": "system"}
+def add_system_prompt(messages):
+    """复制消息，并在需要时加入与SFT阶段相同的system prompt。"""
+    copied_messages = [dict(message) for message in messages]
+    if not copied_messages or copied_messages[0].get("role") != "system":
+        copied_messages.insert(
+            0,
+            {"content": "You are a helpful assistant", "role": "system"}
+        )
+    return copied_messages
+
+
+def tokenize_preference_pair(preference_row, pair_index):
+    """对共同prompt只tokenize一次，并为两个回答保留相同上下文。
+
+    原先直接右截断完整序列；长prompt会占满1700个token并删除回答。这里先
+    分离共同prompt和两个completion，对prompt统一左截断，再拼接回答。
+    """
+    raw_chosen = preference_row['chosen']
+    raw_rejected = preference_row['rejected']
+
+    if raw_chosen[:-1] != raw_rejected[:-1]:
+        raise ValueError(
+            f"Preference pair {pair_index} does not share the same prompt"
+        )
+    if (
+        not raw_chosen
+        or not raw_rejected
+        or raw_chosen[-1].get("role") != "assistant"
+        or raw_rejected[-1].get("role") != "assistant"
+    ):
+        raise ValueError(
+            f"Preference pair {pair_index} must end with assistant answers"
+        )
+
+    prompt_messages = add_system_prompt(raw_chosen[:-1])
+    chosen_messages = add_system_prompt(raw_chosen)
+    rejected_messages = add_system_prompt(raw_rejected)
+
+    # generation prompt包含assistant header，但不包含回答内容。
+    prompt_ids = tokenize_and_format(
+        prompt_messages,
+        add_generation_prompt=True
     )
-    input_ids = tokenize_and_format(data)
-    rejected_input_ids_list.append(input_ids)
-    i += 1
-    if i % 10000 == 0 or i == number_of_preference_pairs:
-        print(f"非偏好数据已处理{i}条数据")
+    complete_chosen_ids = tokenize_and_format(chosen_messages)
+    complete_rejected_ids = tokenize_and_format(rejected_messages)
+
+    # 完整chosen/rejected必须以完全相同的prompt tokens开头。
+    if (
+        complete_chosen_ids[:len(prompt_ids)] != prompt_ids
+        or complete_rejected_ids[:len(prompt_ids)] != prompt_ids
+    ):
+        raise RuntimeError(
+            f"Chat-template prompt prefix mismatch in preference pair {pair_index}"
+        )
+
+    chosen_completion_ids = complete_chosen_ids[len(prompt_ids):]
+    rejected_completion_ids = complete_rejected_ids[len(prompt_ids):]
+    if not chosen_completion_ids or not rejected_completion_ids:
+        raise ValueError(f"Preference pair {pair_index} has an empty completion")
+
+    # 从左侧截断共同prompt，保留最接近回答的上下文和assistant header。
+    prompt_ids = prompt_ids[-DPOConfig.max_prompt_length:]
+    completion_budget = DPOConfig.max_length - len(prompt_ids)
+    if completion_budget < 1:
+        raise ValueError("max_prompt_length must be smaller than max_length")
+
+    # completion从右侧截断以保留回答开头。两个序列仍共享完全相同的prompt。
+    chosen_input_ids = prompt_ids + chosen_completion_ids[:completion_budget]
+    rejected_input_ids = prompt_ids + rejected_completion_ids[:completion_budget]
+    return chosen_input_ids, rejected_input_ids
+
+## 同时生成chosen/rejected的input_ids，确保每个偏好对始终保持对齐
+chosen_input_ids_list = []
+rejected_input_ids_list = []
+
+# 使用train_prefs中的全部偏好对，不再限制为前30000条。
+number_of_preference_pairs = len(binarized_data)
+for i in range(number_of_preference_pairs):
+    chosen_input_ids, rejected_input_ids = tokenize_preference_pair(
+        binarized_data[i], i
+    )
+    chosen_input_ids_list.append(chosen_input_ids)
+    rejected_input_ids_list.append(rejected_input_ids)
+
+    processed_count = i + 1
+    if processed_count % 10000 == 0 or processed_count == number_of_preference_pairs:
+        print(f"偏好对数据已处理{processed_count}条")
+
+print('-' * 70)
 
 ## 确保数据条数一致
 assert len(chosen_input_ids_list) == len(rejected_input_ids_list)
@@ -462,10 +514,10 @@ for batch_idx in range(total_batches):
     rejected_min_tokens = rejected_final_mask.sum(dim=-1).min().item()
     
     if preferred_min_tokens == 0 or rejected_min_tokens == 0:
-        # 静默跳过会破坏chosen/rejected配对和梯度累积边界。明确报错更安全，
-        # 用户可以增大max_length后重新运行。
+        # 新的paired tokenization已为回答保留空间；若仍到达这里，说明chat
+        # template或mask逻辑不兼容，不应静默跳过并破坏梯度累积边界。
         raise RuntimeError(
-            f'第{batch_idx + 1}批次的偏好回答被截断，请增大max_length'
+            f'第{batch_idx + 1}批次没有有效回答token，请检查chat template'
         )
 
     ## ==================== 模型前向传播 ====================
