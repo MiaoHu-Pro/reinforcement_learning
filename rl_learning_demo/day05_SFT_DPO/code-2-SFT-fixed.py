@@ -18,6 +18,9 @@ Useful commands:
 
     # Run the default 5,000-example training job.
     uv run python code-2-fixed.py --device cuda
+
+
+    base on code-2.py
 """
 
 import argparse
@@ -53,10 +56,10 @@ class SFTConfig:
     output_dir: Path = (
         Path("~/scratch/llms_model/post_trained_models/")
         .expanduser()
-        / "Qwen3-0.6B-SFT-fixed"
+        / "Qwen3-0.6B-SFT"
     )
     cache_dir: Path = Path("/tmp/rl-huggingface-cache")
-    log_path: Path = PROJECT_ROOT / "logs" / "Qwen3-0.6B-SFT-fixed.log"
+    log_path: Path = PROJECT_ROOT / "logs" / "Qwen3-0.6B-SFT.log"
 
     max_length: int = 2500
     max_samples: int = 200_000

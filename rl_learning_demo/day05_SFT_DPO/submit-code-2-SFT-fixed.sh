@@ -72,7 +72,7 @@ nvidia-smi
 # srun launches the training process inside the resources allocated by sbatch.
 # code-2-fixed.py currently defaults to 200,000 samples, batch size 2,
 # and one epoch.
-srun "${PYTHON_EXECUTABLE}" code-2-fixed.py \
+srun "${PYTHON_EXECUTABLE}" code-2-SFT-fixed.py \
     --model-path "${MODEL_PATH}" \
     --device cuda
 
@@ -87,3 +87,42 @@ echo "Finished: $(date --iso-8601=seconds)"
 #      "transformers[serving]>=5.16.1" \
 #      "datasets>=5.0.1" \
 #      "modelscope>=1.39.1"
+
+# First find the job ID:
+ #
+ #  squeue -u "$USER" \
+ #      -o "%.18i %.12P %.25j %.8T %.12M %R"
+ #
+ #  Suppose the job ID is 123456. Open a shell inside the same allocation:
+ #
+ #  srun --jobid=123456 \
+ #      --overlap \
+ #      --ntasks=1 \
+ #      --cpus-per-task=1 \
+ #      --pty bash
+ #
+ #  Then continuously monitor the GPU:
+ #
+ #  watch -n 2 nvidia-smi
+ #
+ #  Important fields are:
+ #
+ #  - GPU-Util: GPU computation utilization
+ #  - Memory-Usage: allocated GPU memory
+ #  - Pwr:Usage: current GPU power
+ #  - The process table should show your Python process
+ #
+ #  Press Ctrl+C, then exit when finished.
+ #
+ #  For a single snapshot:
+ #
+ #  srun --jobid=123456 --overlap nvidia-smi
+ #
+ #  You can also inspect CPU and host-memory usage:
+ #
+ #  sstat -j 123456.batch \
+ #      --format=JobID,AveCPU,AveRSS,MaxRSS
+ #
+ #  Your Slurm output already contains one nvidia-smi snapshot, but it was taken before training started.
+ #  For future jobs, continuous GPU statistics can be added to the Slurm script and written to a separate
+ #  CSV file every 60 seconds.
