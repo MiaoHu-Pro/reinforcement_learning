@@ -4,9 +4,9 @@ from torch.utils.data import DataLoader
 from datasets import load_dataset
 from pprint import pprint
 
-pretrained_model_path = "./gpt2-chinese-cluecorpussmall"
+pretrained_model_path = "/home/mh1f25/scratch/llms_model/gpt2-chinese-cluecorpussmall"
 
-dataset = load_dataset("csv", data_files="online_shopping_10_cats.csv")
+dataset = load_dataset("csv", data_files="./data/online_shopping_10_cats.csv")
 
 ds_train = dataset["train"]
 # 将评论少于1024个字的过滤出来
@@ -68,11 +68,11 @@ for epoch in range(num_epochs):
         if i % 100 == 0:
             print(f"Step: {i}, Loss: {loss.item()}")
 
-model.save_pretrained("./gpt2-sft")
-tokenizer.save_pretrained("./gpt2-sft")
+model.save_pretrained("/home/mh1f25/scratch/llms_model/post_trained_models/gpt2-chinese-cluecorpussmall-sft")
+tokenizer.save_pretrained("/home/mh1f25/scratch/llms_model/post_trained_models/gpt2-chinese-cluecorpussmall-sft")
 
 
 # 测试微调后的模型
-g = pipeline("text-generation", model="./gpt2-sft")
+g = pipeline("text-generation", model="/home/mh1f25/scratch/llms_model/post_trained_models/gpt2-chinese-cluecorpussmall-sft")
 set_seed(42)
 pprint(g("这本书真是", max_length=300, num_return_sequences=1))
