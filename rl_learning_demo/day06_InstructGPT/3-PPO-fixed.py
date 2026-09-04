@@ -460,7 +460,8 @@ def ppo_update(input_data, old_logprobs, masks, advantages, returns):
 # 收集on-policy轨迹并立即进行PPO更新
 # -----------------------------------------------------------------------------
 num_epochs = 1
-max_rollout_batches = 100  # 教学示例：最多使用100批轨迹；设为None可遍历整轮。
+# max_rollout_batches = 100  # 教学示例：最多使用100批轨迹；设为None可遍历整轮。
+max_rollout_batches = None  # 教学示例：最多使用100批轨迹；设为None可遍历整轮。
 rollout_count = 0
 model.eval()
 
