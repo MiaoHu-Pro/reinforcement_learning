@@ -1,484 +1,578 @@
-from transformers import DataCollatorWithPadding
+"""
+使用PPO对SFT语言模型进行RLHF训练。
+
+本脚本与day06中的前两个fixed脚本衔接：
+1. 从1-SFT-fixed.py保存的SFT模型初始化actor和reference model；
+2. 从2-RM-fixed.py保存的checkpoint恢复reward model；
+3. actor生成response，reward model提供序列级奖励；
+4. PPO使用GAE、概率比率裁剪和value loss更新actor-critic；
+5. 最后只把训练后的语言模型（actor）保存为可直接加载的HF模型，另外保存value head。
+
+Key fixes:
+
+  - Uses the correct SFT and reward-model server paths.
+  - Restores the reward-model checkpoint dictionary correctly.
+  - Matches the AutoModel reward-model architecture from 2-RM-fixed.py.
+  - Converts raw reward logits using sigmoid.
+  - Correctly handles [PAD], [SEP], response masks, and token alignment.
+  - Prevents GAE from propagating through prompt/padding positions.
+  - Uses unwhitened GAE for critic targets and whitened advantages for the actor.
+  - Supports incomplete final batches.
+  - Shuffles PPO mini-batches and clips gradients.
+  - Freezes the reference and reward models.
+  - Adds comparable SFT-versus-PPO validation.
+  - Saves results to:
+    ~/scratch/llms_model/post_trained_models/gpt2-chinese-cluecorpussmall-ppo
+    
+"""
+
 from copy import deepcopy
-from torch.utils.data import DataLoader
+from pathlib import Path
 import random
+
 from datasets import load_dataset
-from transformers import AutoTokenizer
 import torch
 from torch import nn
-import numpy as np
-from transformers import AutoModelForCausalLM
+from torch.utils.data import DataLoader
 import torch.nn.functional as F
+from transformers import (
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    DataCollatorWithPadding,
+    set_seed,
+)
 
-device = torch.device("cuda")
+
+# -----------------------------------------------------------------------------
+# 路径和可复现实验设置
+# -----------------------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SFT_MODEL_PATH = Path(
+    "~/scratch/llms_model/post_trained_models/"
+    "gpt2-chinese-cluecorpussmall-sft"
+).expanduser()
+REWARD_MODEL_DIR = Path(
+    "~/scratch/llms_model/post_trained_models/"
+    "gpt2-chinese-cluecorpussmall-reward-model"
+).expanduser()
+REWARD_MODEL_CHECKPOINT = REWARD_MODEL_DIR / "reward_model.pt"
+PPO_OUTPUT_DIR = Path(
+    "~/scratch/llms_model/post_trained_models/"
+    "gpt2-chinese-cluecorpussmall-ppo"
+).expanduser()
+DATA_PATH = PROJECT_ROOT / "data" / "online_shopping_10_cats.csv"
+
+for required_path, description in (
+    (SFT_MODEL_PATH, "SFT模型目录"),
+    (REWARD_MODEL_CHECKPOINT, "reward model checkpoint"),
+    (DATA_PATH, "训练数据"),
+):
+    if not required_path.exists():
+        raise FileNotFoundError(f"{description}不存在: {required_path}")
+
+seed = 42
+set_seed(seed)
+random.seed(seed)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"训练设备: {device}")
 
 
+# -----------------------------------------------------------------------------
+# Reward model：结构必须与2-RM-fixed.py完全一致
+# -----------------------------------------------------------------------------
 class RewardModel(nn.Module):
-    """
-    GPT2模型加上一个"奖励头"
-    """
+    """GPT-2 backbone加一个逐token的线性reward head。"""
 
     def __init__(self, model_name):
         super().__init__()
-        self.llm = AutoModelForCausalLM.from_pretrained(model_name)
-        # 添加奖励头
+        # 2-RM-fixed.py使用AutoModel，而不是AutoModelForCausalLM。
+        # 如果这里换成CausalLM，保存的state_dict键和网络结构都会不匹配。
+        self.llm = AutoModel.from_pretrained(
+            str(model_name),
+            local_files_only=True,
+        )
         self.reward_head = nn.Linear(self.llm.config.hidden_size, 1)
 
     def forward(self, input_ids, attention_mask):
-        # GPT2的输出
-        transformer_outputs = self.llm.forward(
-            input_ids,
+        transformer_outputs = self.llm(
+            input_ids=input_ids,
             attention_mask=attention_mask,
-            output_hidden_states=True,
         )
-
-        # 获取最后一层隐藏层
-        last_hidden_state = transformer_outputs.hidden_states[-1]
-
-        # 对隐藏层给出奖励
-        rewards = self.reward_head(last_hidden_state).squeeze(-1)
-        # 归一化
-        return torch.sigmoid(rewards)
+        last_hidden_state = transformer_outputs.last_hidden_state
+        # 与训练reward model时一致：返回raw logits，不在模型内部做sigmoid。
+        return self.reward_head(last_hidden_state).squeeze(-1)
 
 
-# 将奖励模型加载
-model_path = "gpt2-sft"
-reward_model = RewardModel(model_path)
-reward_model.load_state_dict(torch.load(
-    "reward_model.pt",
-    map_location='cpu'))
+# 2-RM-fixed.py保存的是包含model_state_dict等元数据的checkpoint字典，
+# 不能把整个字典直接传给load_state_dict。
+reward_checkpoint = torch.load(REWARD_MODEL_CHECKPOINT, map_location="cpu")
+if "model_state_dict" not in reward_checkpoint:
+    raise KeyError(
+        f"{REWARD_MODEL_CHECKPOINT}缺少model_state_dict；"
+        "请使用2-RM-fixed.py生成reward model"
+    )
+
+reward_model = RewardModel(SFT_MODEL_PATH)
+reward_model.load_state_dict(reward_checkpoint["model_state_dict"])
+reward_model.to(device)
+reward_model.eval()
+reward_model.requires_grad_(False)
 
 
+# -----------------------------------------------------------------------------
+# Actor-Critic：actor是SFT语言模型，critic是共享backbone上的value head
+# -----------------------------------------------------------------------------
 class ActorCriticModel(nn.Module):
-    """
-    GPT2模型+一个价值头
-    """
+    """GPT-2 actor加一个逐token的value head。"""
 
     def __init__(self, model_path):
         super().__init__()
-        # 这个要初始化为我们微调出来的gpt2-sft模型
-        # actor演员模型：策略模型
-        self.llm = AutoModelForCausalLM.from_pretrained(model_path)
-        # 添加价值头
-        # critic评论家模型：价值函数模型，价值头，线性层
+        self.llm = AutoModelForCausalLM.from_pretrained(
+            str(model_path),
+            local_files_only=True,
+        )
         self.v_head = nn.Linear(self.llm.config.hidden_size, 1)
 
     def forward(self, input_ids, attention_mask):
-        # gpt2-sft模型的输出
-        transformer_outputs = self.llm.forward(
-            input_ids,
+        transformer_outputs = self.llm(
+            input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=True,
         )
-        # 输出的token的logits，维度为 `vocab_size`
         lm_logits = transformer_outputs.logits
-        # 获取最后一层隐藏层
         last_hidden_state = transformer_outputs.hidden_states[-1]
-
-        # 评估token的价值，评估的是最后一个隐藏层的价值
-        value = self.v_head(last_hidden_state).squeeze(-1)
-        # 返回输出的token的logits和token的价值
-        return lm_logits, value
+        values = self.v_head(last_hidden_state).squeeze(-1)
+        return lm_logits, values
 
     def generate(self, *args, **kwargs):
         return self.llm.generate(*args, **kwargs)
 
 
-# 初始化：gpt2-sft + v_head
-model = ActorCriticModel(model_path)
-model = model.to(device)
-reward_model = reward_model.to(device)
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-tokenizer.pad_token = tokenizer.eos_token
+tokenizer = AutoTokenizer.from_pretrained(
+    str(SFT_MODEL_PATH),
+    local_files_only=True,
+)
+# 中文GPT-2使用BERT词表：[PAD]用于padding，[SEP]用于终止/reward token。
+# 不能用tokenizer.pad_token = tokenizer.eos_token覆盖已有的[PAD]。
+if tokenizer.pad_token_id is None or tokenizer.sep_token_id is None:
+    raise RuntimeError("Tokenizer必须同时提供[PAD]和[SEP] token")
+tokenizer.model_input_names = ["input_ids", "attention_mask"]
 
-# 准备提示词的方式是从数据集中随机截取一段开头作为提示词
-ds = load_dataset("csv", data_files="online_shopping_10_cats.csv")
-ds_train = ds['train']
+REWARD_TOKEN_ID = reward_checkpoint.get(
+    "reward_token_id",
+    tokenizer.sep_token_id,
+)
+if REWARD_TOKEN_ID != tokenizer.sep_token_id:
+    raise RuntimeError(
+        "Reward model使用的reward token与SFT tokenizer的[SEP]不一致"
+    )
 
-ds_train = ds_train.filter(lambda x: x["review"] != None and len(
-    x["review"]) > 20 and len(x["review"]) < 1024)
+model = ActorCriticModel(SFT_MODEL_PATH).to(device)
 
-# 截取评论数据的前2～8个字作为提示词
+# reference model是训练开始时actor的冻结副本，用来计算KL惩罚。
+# 它在整个PPO训练中保持不变，不能加入optimizer。
+ref_model = deepcopy(model).to(device)
+ref_model.eval()
+ref_model.requires_grad_(False)
+
+
+# -----------------------------------------------------------------------------
+# 准备prompt数据
+# -----------------------------------------------------------------------------
+ds = load_dataset("csv", data_files=str(DATA_PATH))
+ds_train = ds["train"]
+ds_train = ds_train.filter(
+    lambda x: x["review"] is not None
+    and 20 < len(x["review"]) < 1024
+)
+
+# 从每条评论开头随机截取2～8个token作为prompt。
 input_min_token_length = 2
 input_max_token_length = 8
 input_token_length_range = list(range(
     input_min_token_length,
-    input_max_token_length))
-# 输出的长度5～16个token
+    input_max_token_length + 1,
+))
+
+# actor每次生成10～30个新token。
 output_min_length = 10
 output_max_length = 30
+output_token_length_range = list(range(
+    output_min_length,
+    output_max_length + 1,
+))
 
 
 def tokenize(sample):
-    # 提示词token的数量随机选择一个
     input_size = random.choice(input_token_length_range)
-    # 如果input_size=3，截取sentence字段文本的前3个token出来
-    sample['input_ids'] = tokenizer.encode(sample['review'])[:input_size]
-    # 前3个token掩码为1
-    sample['attention_mask'] = [1] * len(sample['input_ids'])
-    # 前3个token对应的文本
-    sample['query'] = tokenizer.decode(sample['input_ids'])
+    # 不自动加入[CLS]/[SEP]；否则很短的prompt会主要由特殊token构成。
+    token_ids = tokenizer.encode(
+        sample["review"],
+        add_special_tokens=False,
+    )[:input_size]
+    sample["input_ids"] = token_ids
+    sample["attention_mask"] = [1] * len(token_ids)
+    sample["query"] = tokenizer.decode(token_ids)
     return sample
 
 
-map_kwargs = {
-    "batched": False,
-    "remove_columns": ['cat', 'review', 'label']
-}
-
-tokenized_dataset_train = ds_train.map(tokenize, **map_kwargs)
-
-tokenized_dataset_train.set_format(type='torch')
-
-REWARD_TOKEN_ID = tokenizer.eos_token_id
-
+tokenized_dataset_train = ds_train.map(
+    tokenize,
+    batched=False,
+    remove_columns=["cat", "review", "label"],
+)
+tokenized_dataset_train.set_format(type="torch")
 
 batch_size = 32
 
 
 def collator(batch):
-    return dict((key, [d[key] for d in batch]) for key in batch[0])
+    """保留变长prompt列表；生成阶段会逐条处理，所以此处不padding。"""
+    return {key: [sample[key] for sample in batch] for key in batch[0]}
 
 
-# 提示词组成的数据集
 train_dataloader = DataLoader(
     tokenized_dataset_train,
     batch_size=batch_size,
     collate_fn=collator,
-    shuffle=True
+    shuffle=True,
+)
+validation_dataloader = DataLoader(
+    tokenized_dataset_train,
+    batch_size=batch_size,
+    collate_fn=collator,
+    shuffle=False,
 )
 
+data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 generation_kwargs = {
-    "min_length": -1,
-    "top_k": 0.0,  # 所有词汇表中的词都可能被选中
-    "top_p": 1.0,  # 包含整个概率分布
+    "top_k": 0,             # 0表示不使用top-k截断；必须是int而不是0.0
+    "top_p": 1.0,
     "do_sample": True,
-    "pad_token_id": tokenizer.pad_token_id
+    "pad_token_id": tokenizer.pad_token_id,
+    "eos_token_id": tokenizer.sep_token_id,
 }
 
-# 冻结的参考模型，只用来计算奖励R_t
-ref_model = deepcopy(model)
 
-# 目的是计算每个token的R_t
+def score_query_response(query_response):
+    """使用冻结reward model给完整的prompt+response打一个序列级分数。"""
+    # RM训练时文本末尾恰好有一个[SEP] reward token。若生成结果已经以
+    # [SEP]结束则不重复添加，否则临时追加一个[SEP]用于评分。
+    if query_response[-1].item() == REWARD_TOKEN_ID:
+        score_input_ids = query_response
+    else:
+        reward_token = torch.tensor(
+            [REWARD_TOKEN_ID],
+            dtype=query_response.dtype,
+            device=query_response.device,
+        )
+        score_input_ids = torch.cat([query_response, reward_token])
+
+    attention_mask = torch.ones_like(score_input_ids, dtype=torch.long)
+    with torch.no_grad():
+        reward_logits = reward_model(
+            score_input_ids.unsqueeze(0),
+            attention_mask.unsqueeze(0),
+        )
+        final_logit = reward_logits[0, -1]
+        # RM由BCEWithLogitsLoss训练，因此先sigmoid得到正向概率，再映射到[-1, 1]。
+        return 2.0 * torch.sigmoid(final_logit) - 1.0
 
 
+# -----------------------------------------------------------------------------
+# 轨迹奖励：reward = reward-model score - beta * sampled KL
+# -----------------------------------------------------------------------------
 def compute_rewards(
-    input_data,  # 输入数据：提示词+补全，一条完整的数据
-    query_tensors,  # 提示词张量
-    response_tensors,  # 补全的张量
-    score_tensors  # 奖励模型给出的分数的张量
+    input_data,
+    query_tensors,
+    response_tensors,
+    score_tensors,
 ):
     with torch.no_grad():
-        # 正在微调的模型所输出的token的logits和token的价值
-        logits, values = model(**input_data)  # b, seq, vocab_size
-        # 冻结的模型的输出
+        logits, all_values = model(**input_data)
         ref_logits, _ = ref_model(**input_data)
-        # 正在微调的模型的输出的对数概率 `log_softmax`
-        # 去掉最后一个token，因为是预测下一个token的任务
-        # input_data如果是："abcde"，那么建立的数据对为：
-        # abcd --> bcde
-        logp = F.log_softmax(
-            logits[:, :-1, :],
-            dim=-1
-        )
-        # 冻结的模型的输出的对数概率
-        ref_logp = F.log_softmax(
-            ref_logits[:, :-1, :],
-            dim=-1
-        )
-        # 实际生成的token序列
-        # 自回归模型是预测下一个token，所以去掉第一个token
-        # 真实标签为：bcde，需要去掉a
-        labels = input_data['input_ids'][:, 1:]  # b, seq
-        # 使用gather提取实际token的概率
-        # logp 是 vocab_size 大小的张量
-        # 假设真实的label是 `hello`
-        # 那么要取出 `hello` 在 logp 张量中的概率
-        logp = torch.gather(
-            logp,
-            2,
-            labels.unsqueeze(-1)
-        ).squeeze(-1)  # batch, seq
-        ref_logp = torch.gather(
-            ref_logp,
-            2,
-            labels.unsqueeze(-1)
-        ).squeeze(-1)  # batch, seq
-        # kl散度
-        kl = logp - ref_logp
-        # kl散度的权重
-        beta = 0.2
-        # 最终奖励的计算
-        rewards = - beta * kl
-        attention_mask = input_data['attention_mask']
-        # 预测下一个token，所以去掉第一个mask
-        masks = torch.zeros_like(attention_mask[:, 1:])
-        masks[:, :] = attention_mask[:, 1:]
-        # 遍历批次中的每一个提示词张量
-        for j in range(len(query_tensors)):
-            # 补全开始的索引
-            start = len(query_tensors[j]) - 1
-            # 补全结束的索引
-            end = start + len(response_tensors[j])
-            # 提示词部分掩码为0
-            masks[j, :start] = 0
-            # 补全后面的填充token掩码为0
-            masks[j, end:] = 0
-            # 将奖励模型给出的分数加到补全的最后一个token的奖励上面
-            rewards[j, end - 1] += score_tensors[j]
-            # 只留下掩码为1的部分的奖励
-            rewards[j, :] *= masks[j, :]
-            # 只留下掩码为1的部分的价值
-            values[j, :-1] *= masks[j, :]
 
-    return logp, rewards, values[:, :-1], masks
+        # 对于输入[x0,x1,...,xT]，位置t的logits预测x(t+1)，所以：
+        # logits去掉最后一项，labels去掉第一项，再用gather提取实际动作概率。
+        labels = input_data["input_ids"][:, 1:]
+        logprobs = torch.gather(
+            F.log_softmax(logits[:, :-1, :], dim=-1),
+            2,
+            labels.unsqueeze(-1),
+        ).squeeze(-1)
+        ref_logprobs = torch.gather(
+            F.log_softmax(ref_logits[:, :-1, :], dim=-1),
+            2,
+            labels.unsqueeze(-1),
+        ).squeeze(-1)
+
+        # 对采样动作的log-ratio是KL的无偏Monte-Carlo估计项。
+        beta = 0.2
+        rewards = -beta * (logprobs - ref_logprobs)
+
+        masks = input_data["attention_mask"][:, 1:].clone().float()
+        values = all_values[:, :-1].clone()
+
+        for j in range(len(query_tensors)):
+            # 第一枚response token由query最后一个位置预测，所以start=q_len-1。
+            start = len(query_tensors[j]) - 1
+            end = start + len(response_tensors[j])
+            if end <= start:
+                raise RuntimeError("生成了空response，无法构造PPO轨迹")
+
+            masks[j, :start] = 0
+            masks[j, end:] = 0
+            # 序列级RM分数只加到response的最后一步。
+            rewards[j, end - 1] += score_tensors[j]
+
+        rewards = rewards * masks
+        values = values * masks
+
+    # 这些量描述旧策略采样得到的固定轨迹，后续PPO epoch不能反传到这里。
+    return logprobs.detach(), rewards.detach(), values.detach(), masks
 
 
 def masked_mean(values, mask):
-    # 计算带掩码的平均值
-    return (values * mask).sum() / mask.sum()
+    denominator = mask.sum()
+    if denominator.item() == 0:
+        raise RuntimeError("mask中没有有效的response token")
+    return (values * mask).sum() / denominator
 
 
 def masked_var(values, mask):
-    # 计算带掩码的方差
     mean = masked_mean(values, mask)
-    centred_values = values - mean
-    return masked_mean(centred_values ** 2, mask)
+    return masked_mean((values - mean) ** 2, mask)
 
 
 def masked_whiten(values, mask):
-    '''
-    对数据进行带掩码的白化处理，
-    让有效数据的方差变为1，但均值保持不变
-    '''
-    mean, var = masked_mean(values, mask), masked_var(values, mask)
-    whitened = (values - mean) * torch.rsqrt(var + 1e-8)
-    whitened += mean
-    return whitened
+    """只根据有效response token计算均值/方差，并变换为零均值、单位方差。"""
+    mean = masked_mean(values, mask)
+    variance = masked_var(values, mask)
+    whitened = (values - mean) * torch.rsqrt(variance + 1e-8)
+    return whitened * mask
 
 
 def compute_advantage(rewards, values, masks):
-    '''
-    广义优势估计（GAE）
-    '''
-    lastgae = 0.0
-    advantage_reversed = []
-    seq_length = rewards.shape[-1]
-    gamma, lam = 1.0, 0.95
+    """
+    计算GAE：
+      delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
+      A_t = delta_t + gamma * lambda * A_{t+1}
 
-    for t in reversed(range(seq_length)):
-        nextvalues = values[:, t + 1] if t < seq_length - 1 else 0.0
-        delta = rewards[:, t] + gamma * nextvalues - values[:, t]
-        lastgae = delta + gamma * lam * lastgae
-        advantage_reversed.append(lastgae)
-    advantages = torch.stack(advantage_reversed[::-1], dim=1)
-    # 对广义优势估计进行了白化处理
-    advantages = masked_whiten(advantages, masks)
+    critic target必须由未白化的GAE构造；白化只用于稳定actor更新。
+    """
+    last_gae = torch.zeros(rewards.shape[0], device=rewards.device)
+    reversed_advantages = []
+    gamma, gae_lambda = 1.0, 0.95
 
-    returns = advantages + values
-    return advantages, returns
+    for t in reversed(range(rewards.shape[1])):
+        if t < rewards.shape[1] - 1:
+            next_values = values[:, t + 1]
+        else:
+            next_values = torch.zeros_like(values[:, t])
+
+        delta = rewards[:, t] + gamma * next_values - values[:, t]
+        # 乘mask防止GAE越过response边界传播到prompt/padding位置。
+        last_gae = (
+            delta + gamma * gae_lambda * last_gae
+        ) * masks[:, t]
+        reversed_advantages.append(last_gae)
+
+    raw_advantages = torch.stack(reversed_advantages[::-1], dim=1)
+    returns = (raw_advantages + values).detach()
+    actor_advantages = masked_whiten(raw_advantages, masks).detach()
+    return actor_advantages, returns
 
 
+# -----------------------------------------------------------------------------
+# PPO loss和更新
+# -----------------------------------------------------------------------------
 learning_rate = 1e-5
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-# 使用旧策略产生的轨迹（补全）更新4次模型
 ppo_epochs = 4
-
-def compute_loss(
-    old_logprobs,  # 冻结的一份概率 π_old 的轨迹数据
-    logprobs,  # 正在微调的模型输出的对数概率 π_theta
-    vpreds,  # 价值由v_head计算
-    masks,  # 掩码
-    advantages,  # 广义优势估计
-    returns  # 回报：GAE Target = A_GAE + V(S_t)
-):
-    # 比率
-    ratio = torch.exp(logprobs - old_logprobs)
-    # 比率 * 广义优势估计
-    pg_loss1 = - ratio * advantages
-    # clip(比率，1-ϵ,1+ϵ) * 广义优势估计
-    pg_loss2 = - torch.clamp(ratio, 1 - 0.2, 1 + 0.2) * advantages
-    # 策略（gpt2-sft）的损失
-    pg_loss = masked_mean(torch.max(pg_loss1, pg_loss2), masks)
-    # 价值网络（价值头）的损失，mse
-    v_loss = masked_mean((vpreds - returns) ** 2, masks)
-    # 由于 正在微调的模型 = gpt2-sft + value_head
-    # 总的损失 = 策略网络的损失 + 0.1 * 价值网络的损失
-    loss = pg_loss + 0.1 * v_loss
-
-    return loss
-
-
-num_epochs = 1
-
-data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 mini_batch_size = 4
 
 
-def ppo_update(input_data, logprobs, masks, advantages, returns):
-    for ep in range(ppo_epochs):
-        # range(0, 32, 4)
-        batch_inds = list(range(batch_size))
-        for start in range(0, batch_size, mini_batch_size):
-            mini_batch_inds = batch_inds[start:start+mini_batch_size]
+def compute_loss(
+    old_logprobs,
+    logprobs,
+    vpreds,
+    masks,
+    advantages,
+    returns,
+):
+    # ratio_t(theta) = pi_theta(a_t|s_t) / pi_old(a_t|s_t)
+    ratio = torch.exp(logprobs - old_logprobs)
+    pg_loss1 = -ratio * advantages
+    pg_loss2 = -torch.clamp(ratio, 1 - 0.2, 1 + 0.2) * advantages
+    pg_loss = masked_mean(torch.maximum(pg_loss1, pg_loss2), masks)
 
-            mb_model_inputs = {
-                'input_ids': input_data
-                ['input_ids']
-                [mini_batch_inds],
-                'attention_mask': input_data
-                ['attention_mask']
-                [mini_batch_inds]
+    # returns是未白化GAE + old V，作为critic回归目标。
+    value_loss = masked_mean((vpreds - returns) ** 2, masks)
+    return pg_loss + 0.1 * value_loss
+
+
+def ppo_update(input_data, old_logprobs, masks, advantages, returns):
+    model.train()
+    rollout_batch_size = input_data["input_ids"].shape[0]
+
+    for ppo_epoch in range(ppo_epochs):
+        # 每个PPO epoch重新打乱同一批轨迹，避免固定mini-batch顺序。
+        batch_indices = torch.randperm(rollout_batch_size).tolist()
+        for start in range(0, rollout_batch_size, mini_batch_size):
+            mini_batch_indices = batch_indices[start:start + mini_batch_size]
+            model_inputs = {
+                "input_ids": input_data["input_ids"][mini_batch_indices],
+                "attention_mask": input_data["attention_mask"][mini_batch_indices],
             }
-            # 模型的输出是token的logits和value
-            mb_logits, mb_vpreds = model(**mb_model_inputs)
-            # 去掉最后一个token
-            mb_logits = F.log_softmax(
-                mb_logits[:, :-1, :],
-                dim=-1
-            )
-            # 取出真实标签对应的概率
-            mb_logprobs = torch.gather(
-                mb_logits,
+
+            logits, value_predictions = model(**model_inputs)
+            labels = model_inputs["input_ids"][:, 1:]
+            new_logprobs = torch.gather(
+                F.log_softmax(logits[:, :-1, :], dim=-1),
                 2,
-                mb_model_inputs['input_ids'][:, 1:].unsqueeze(-1)
+                labels.unsqueeze(-1),
             ).squeeze(-1)
 
-            loss= compute_loss(
-                logprobs[mini_batch_inds],
-                mb_logprobs,
-                mb_vpreds[:, :-1],
-                masks[mini_batch_inds],
-                advantages[mini_batch_inds],
-                returns[mini_batch_inds]
+            loss = compute_loss(
+                old_logprobs[mini_batch_indices],
+                new_logprobs,
+                value_predictions[:, :-1],
+                masks[mini_batch_indices],
+                advantages[mini_batch_indices],
+                returns[mini_batch_indices],
             )
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            print('loss/total', loss.item())
-    print('ppo update finished')
+
+        print(
+            f"PPO epoch {ppo_epoch + 1}/{ppo_epochs}, "
+            f"last mini-batch loss: {loss.item():.4f}"
+        )
+
+    model.eval()
 
 
-count = 0
+# -----------------------------------------------------------------------------
+# 收集on-policy轨迹并立即进行PPO更新
+# -----------------------------------------------------------------------------
+num_epochs = 1
+max_rollout_batches = 100  # 教学示例：最多使用100批轨迹；设为None可遍历整轮。
+rollout_count = 0
+model.eval()
+
 for epoch in range(num_epochs):
     for batch in train_dataloader:
-        if count == 100:
+        if max_rollout_batches is not None and rollout_count >= max_rollout_batches:
             break
-        count += 1
-        # 生成补全内容（回复）
-        query_tensors = batch['input_ids']  # 提示词的张量
-        query_attention_masks = batch['attention_mask']
+        rollout_count += 1
 
-        response_tensors = []  # 补全的张量
-        query_response_tensors = []  # 提示词+补全的张量
-        score_tensors = []  # 分数的张量
+        query_tensors = batch["input_ids"]
+        query_attention_masks = batch["attention_mask"]
+        response_tensors = []
+        query_response_tensors = []
+        score_tensors = []
 
-        for i, query in enumerate(query_tensors):
-            query = query.to(device)
-            query_attention_mask = query_attention_masks[i].to(device)
-            # 随机挑一个补全的长度
-            new_tokens = random.choice(list(range(
-                output_min_length,
-                output_max_length)))
-            # 设置补全长度属性
-            generation_kwargs["max_new_tokens"] = new_tokens
-            # 提示词 + 补全
-            query_response = model.generate(
-                input_ids=query.unsqueeze(0),
-                attention_mask=query_attention_mask.unsqueeze(0),
-                **generation_kwargs
-            ).squeeze(0)
-            # 补全的长度
-            response_len = len(query_response) - len(query)
-            # 补全的张量
-            response_tensors.append(query_response[-response_len:])
-            query_response_tensors.append(query_response)
-            # 从奖励模型拿分数
-            with torch.no_grad():
-                # 提示词 + 补全 + reward_token
-                query_response_score = torch.cat([
-                    query_response,
-                    torch.tensor([REWARD_TOKEN_ID]).to(device)])
-                attention_mask = torch.ones_like(
-                    query_response_score,
-                    dtype=torch.long)
-                # 奖励模型的评分
-                score = reward_model(
-                    query_response_score.unsqueeze(0),
-                    attention_mask.unsqueeze(0)
-                ).squeeze(0)[-1]
-                # 将奖励模型的评分从(0,1)缩放到(-1,1)
-                score = 2 * (score - 0.5)
-            score_tensors.append(score)
+        # 生成动作属于采样/环境交互阶段，不构建梯度图。
+        with torch.no_grad():
+            for i, query in enumerate(query_tensors):
+                query = query.to(device)
+                query_attention_mask = query_attention_masks[i].to(device)
+                new_tokens = random.choice(output_token_length_range)
 
+                query_response = model.generate(
+                    input_ids=query.unsqueeze(0),
+                    attention_mask=query_attention_mask.unsqueeze(0),
+                    min_new_tokens=output_min_length,
+                    max_new_tokens=new_tokens,
+                    **generation_kwargs,
+                ).squeeze(0)
+                response = query_response[len(query):]
+                if response.numel() == 0:
+                    raise RuntimeError("actor生成了空response")
+
+                response_tensors.append(response)
+                query_response_tensors.append(query_response)
+                score_tensors.append(score_query_response(query_response))
+
+        # 对完整序列padding，供actor/reference并行前向传播。
         input_data = data_collator([
             {
-                'input_ids': ids,
-                'attention_mask': torch.ones_like(ids)
+                "input_ids": ids,
+                "attention_mask": torch.ones_like(ids),
             }
             for ids in query_response_tensors
         ]).to(device)
 
-        # 奖励和优势
-        logprobs, rewards, values, masks = compute_rewards(
+        old_logprobs, rewards, values, masks = compute_rewards(
             input_data,
             query_tensors,
             response_tensors,
-            score_tensors
+            score_tensors,
         )
-        # 计算GAE和GAE Target
         advantages, returns = compute_advantage(rewards, values, masks)
-
-        # 小批次训练
-        if input_data["input_ids"].shape[0] != 32:
-            break
-        ppo_update(input_data, logprobs, masks, advantages, returns)
-
-print(len(tokenized_dataset_train))
-train_gen_lengths = [0] * len(tokenized_dataset_train)
-for i in range(len(tokenized_dataset_train)):
-    train_gen_lengths[i] = random.choice(list(range(
-        output_min_length,
-        output_max_length)))
+        # ppo_update按实际batch大小工作，因此最后一个不足32的batch也能更新。
+        ppo_update(
+            input_data,
+            old_logprobs,
+            masks,
+            advantages,
+            returns,
+        )
+        print(f"rollout batch {rollout_count} PPO update完成")
 
 
-def validate():
+# -----------------------------------------------------------------------------
+# 用相同prompt、生成长度和随机种子公平比较SFT reference与PPO actor
+# -----------------------------------------------------------------------------
+def validate(policy_model, model_name, max_batches=10):
     scores = []
-    count = 0
-    for b, batch in enumerate(train_dataloader):
-        if count == 100:
-            break
-        count += 1
-        # 生成补全内容
-        query_tensors = batch['input_ids']
-        query_attention_masks = batch['attention_mask']
-        for i, query in enumerate(query_tensors):
-            query = query.to(device)
-            query_attention_mask = query_attention_masks[i].to(device)
-            new_tokens = train_gen_lengths[b * len(query_tensors) + i]
-            generation_kwargs["max_new_tokens"] = new_tokens
-            query_response = model.generate(
-                input_ids=query.unsqueeze(0),
-                attention_mask=query_attention_mask.unsqueeze(0),
-                **generation_kwargs
-            ).squeeze(0)
-            query_response_score = torch.cat([
-                query_response,
-                torch.tensor([REWARD_TOKEN_ID]).to(device)])
-            attention_mask = torch.ones_like(
-                query_response_score, dtype=torch.long)
-            score = reward_model(
-                query_response_score.unsqueeze(0),
-                attention_mask.unsqueeze(0)
-            ).squeeze(0)[-1]
-            score = 2 * (score - 0.5)
-            scores.append(score.item())
-    print('平均分数:', sum(scores) / len(scores))
+    policy_model.eval()
+
+    # 两次validate都重置同样的随机数，使prompt、长度和采样随机流可比较。
+    random.seed(2026)
+    torch.manual_seed(2026)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(2026)
+
+    with torch.no_grad():
+        for batch_index, batch in enumerate(validation_dataloader):
+            if batch_index >= max_batches:
+                break
+
+            for i, query in enumerate(batch["input_ids"]):
+                query = query.to(device)
+                query_attention_mask = batch["attention_mask"][i].to(device)
+                new_tokens = random.choice(output_token_length_range)
+                query_response = policy_model.generate(
+                    input_ids=query.unsqueeze(0),
+                    attention_mask=query_attention_mask.unsqueeze(0),
+                    min_new_tokens=output_min_length,
+                    max_new_tokens=new_tokens,
+                    **generation_kwargs,
+                ).squeeze(0)
+                scores.append(score_query_response(query_response).item())
+
+    if not scores:
+        raise RuntimeError("验证集没有产生任何reward score")
+    mean_score = sum(scores) / len(scores)
+    print(f"{model_name}平均reward score: {mean_score:.4f}")
+    return mean_score
 
 
-validate()
+validate(ref_model, "SFT reference")
+validate(model, "PPO actor")
 
-model_path = './gpt2-sft'
-model = ActorCriticModel(model_path).to(device)
-validate()
+
+# -----------------------------------------------------------------------------
+# 保存训练后的actor和value head
+# -----------------------------------------------------------------------------
+PPO_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+model.llm.save_pretrained(PPO_OUTPUT_DIR)
+tokenizer.save_pretrained(PPO_OUTPUT_DIR)
+torch.save(model.v_head.state_dict(), PPO_OUTPUT_DIR / "value_head.pt")
+print(f"PPO actor已保存到: {PPO_OUTPUT_DIR}")
+print(f"Value head已保存到: {PPO_OUTPUT_DIR / 'value_head.pt'}")
