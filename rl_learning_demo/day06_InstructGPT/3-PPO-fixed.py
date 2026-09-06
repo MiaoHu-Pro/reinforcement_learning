@@ -122,6 +122,7 @@ reward_model.requires_grad_(False)
 
 # -----------------------------------------------------------------------------
 # Actor-Critic：actor是SFT语言模型，critic是共享backbone上的value head
+# 策略模型
 # -----------------------------------------------------------------------------
 class ActorCriticModel(nn.Module):
     """GPT-2 actor加一个逐token的value head。"""
@@ -132,6 +133,8 @@ class ActorCriticModel(nn.Module):
             str(model_path),
             local_files_only=True,
         )
+        # 添加价值头--> 价值函数
+        # critic评论家模型：价值函数模型，价值头，线性层
         self.v_head = nn.Linear(self.llm.config.hidden_size, 1)
 
     def forward(self, input_ids, attention_mask):
@@ -140,10 +143,53 @@ class ActorCriticModel(nn.Module):
             attention_mask=attention_mask,
             output_hidden_states=True,
         )
+        # # Actor输出：每个位置对词表中所有下一token动作的未归一化分数
+        #   - lm_logits: actor output—scores for selecting the next token.
         lm_logits = transformer_outputs.logits
+        # 最后一个隐藏层
+        #
         last_hidden_state = transformer_outputs.hidden_states[-1]
+        # 对最后一个隐藏层评估价值
+        # - values: critic output—estimated future reward from each token-prefix state.
         values = self.v_head(last_hidden_state).squeeze(-1)
+
+
         return lm_logits, values
+        """
+        example: 
+         ### Actor and critic alignment
+
+          At position $t$:
+        
+          Hidden state h_t
+                │
+                ├── LM head ──> logits_t ──> πθ(A_t | S_t)
+                │
+                └── value head ────────────> Vφ(S_t)
+        
+          Both outputs use the same Transformer representation:
+        
+          - the actor decides which next token to generate;
+          - the critic estimates how promising the current generated prefix is.
+        
+          For the sequence:
+        
+          这 本 书 真 是
+        
+          the output at the position containing 真 means approximately:
+        
+          State:       "这本书真"
+          Actor:       probabilities of the next token
+          Critic:      expected future reward after seeing "这本书真"
+          Actual action: "是"
+        
+          The PPO actor loss updates lm_logits, while the critic loss trains v_head to make
+          values closer to the GAE value targets.
+
+
+        """
+
+
 
     def generate(self, *args, **kwargs):
         return self.llm.generate(*args, **kwargs)
@@ -287,20 +333,23 @@ def compute_rewards(
     input_data,
     query_tensors,
     response_tensors,
-    score_tensors,
+    score_tensors, # 奖励模型给出的分数的张量
 ):
     with torch.no_grad():
+        #
         logits, all_values = model(**input_data)
         ref_logits, _ = ref_model(**input_data)
 
         # 对于输入[x0,x1,...,xT]，位置t的logits预测x(t+1)，所以：
         # logits去掉最后一项，labels去掉第一项，再用gather提取实际动作概率。
         labels = input_data["input_ids"][:, 1:]
+
         logprobs = torch.gather(
             F.log_softmax(logits[:, :-1, :], dim=-1),
             2,
             labels.unsqueeze(-1),
         ).squeeze(-1)
+
         ref_logprobs = torch.gather(
             F.log_softmax(ref_logits[:, :-1, :], dim=-1),
             2,
@@ -309,21 +358,28 @@ def compute_rewards(
 
         # 对采样动作的log-ratio是KL的无偏Monte-Carlo估计项。
         beta = 0.2
+        # 最终奖励的计算的右边式子：[−𝛽 * log 𝜋𝜃(𝑦0|𝑥)/𝜋ref(𝑦0|𝑥), −𝛽 * log 𝜋𝜃(𝑦1|𝑥,𝑦0)/𝜋ref(𝑦1|𝑥,𝑦0), …]
         rewards = -beta * (logprobs - ref_logprobs)
-
+        # 预测下一个token，所以去掉第一个mask
         masks = input_data["attention_mask"][:, 1:].clone().float()
         values = all_values[:, :-1].clone()
 
         for j in range(len(query_tensors)):
             # 第一枚response token由query最后一个位置预测，所以start=q_len-1。
             start = len(query_tensors[j]) - 1
+            # len(response_tensors[j]) 补全张量的长度
             end = start + len(response_tensors[j])
+            # end 是指向 EOS
             if end <= start:
                 raise RuntimeError("生成了空response，无法构造PPO轨迹")
-
+            # query的最后一个token 和完整的预测部分 （包括EOS）保留mask
+            # 其他部分都置为零
             masks[j, :start] = 0
             masks[j, end:] = 0
             # 序列级RM分数只加到response的最后一步。
+            # 将奖励模型给出的分数加到补全的最后一个token的奖励上面，得到
+            # # { −𝛽 log [𝜋𝜃(𝑦0|𝑥)/𝜋ref(𝑦0|𝑥)] , −𝛽 log [𝜋𝜃(𝑦1|𝑥,𝑦0)/𝜋ref(𝑦1|𝑥,𝑦0)], …,
+            # score − 𝛽 log [𝜋𝜃(𝑦𝑇 |𝑥,𝑦< 𝑇)/𝜋ref(𝑦𝑇 |𝑥,𝑦<𝑇)] }
             rewards[j, end - 1] += score_tensors[j]
 
         rewards = rewards * masks
@@ -361,6 +417,7 @@ def compute_advantage(rewards, values, masks):
 
     critic target必须由未白化的GAE构造；白化只用于稳定actor更新。
     """
+
     last_gae = torch.zeros(rewards.shape[0], device=rewards.device)
     reversed_advantages = []
     gamma, gae_lambda = 1.0, 0.95
@@ -394,12 +451,12 @@ mini_batch_size = 4
 
 
 def compute_loss(
-    old_logprobs,
-    logprobs,
-    vpreds,
+    old_logprobs, # 旧策略输出的概率log 𝜋𝜃old (𝑎𝑡|𝑠𝑡)
+    logprobs, # 正在微调的模型输出的对数概率log 𝜋𝜃(𝑎𝑡|𝑠𝑡)
+    vpreds, # 价值 𝑉 (𝑆𝑡)
     masks,
-    advantages,
-    returns,
+    advantages, # 广义优势估计𝐴_t^GAE
+    returns,  # gae目标 𝐴_t^GAE + 𝑉(𝑆𝑡)
 ):
     # ratio_t(theta) = pi_theta(a_t|s_t) / pi_old(a_t|s_t)
     ratio = torch.exp(logprobs - old_logprobs)
@@ -408,7 +465,9 @@ def compute_loss(
     pg_loss = masked_mean(torch.maximum(pg_loss1, pg_loss2), masks)
 
     # returns是未白化GAE + old V，作为critic回归目标。
+    # # MSELoss(𝑉(𝑆𝑡), GAE_Target) → 0
     value_loss = masked_mean((vpreds - returns) ** 2, masks)
+    # 使用衰减因子 0.1 减少value_loss的影响
     return pg_loss + 0.1 * value_loss
 
 
@@ -461,7 +520,7 @@ def ppo_update(input_data, old_logprobs, masks, advantages, returns):
 # -----------------------------------------------------------------------------
 num_epochs = 1
 # max_rollout_batches = 100  # 教学示例：最多使用100批轨迹；设为None可遍历整轮。
-max_rollout_batches = None  # 教学示例：最多使用100批轨迹；设为None可遍历整轮。
+max_rollout_batches = None  # 设为None可遍历整轮。
 rollout_count = 0
 model.eval()
 
@@ -482,13 +541,14 @@ for epoch in range(num_epochs):
             for i, query in enumerate(query_tensors):
                 query = query.to(device)
                 query_attention_mask = query_attention_masks[i].to(device)
+                # 随机选一个补全的长度 new_tokens
                 new_tokens = random.choice(output_token_length_range)
-
+                #
                 query_response = model.generate(
                     input_ids=query.unsqueeze(0),
                     attention_mask=query_attention_mask.unsqueeze(0),
                     min_new_tokens=output_min_length,
-                    max_new_tokens=new_tokens,
+                    max_new_tokens=new_tokens,  # 设置补全的长度
                     **generation_kwargs,
                 ).squeeze(0)
                 response = query_response[len(query):]

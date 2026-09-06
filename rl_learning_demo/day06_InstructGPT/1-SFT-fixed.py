@@ -102,7 +102,7 @@ data_collator = DataCollatorForLanguageModeling(
     tokenizer,
     mlm=False  # 将数据整理成预测下一个token的格式
 )
-
+# mlm= Ture， 变成BERT训练的格式（完形填空格式）
 # 固定训练shuffle与其他PyTorch随机操作，便于复现实验。
 set_seed(42)
 
