@@ -79,8 +79,8 @@ def main():
 
     current_time = datetime.now().strftime(r"%Y%m%d-%H%M%S")
     tb_writer = SummaryWriter(log_dir=f"./logs/{current_time}")
-    tokenizer = Tokenizer("~/scratch/llms_model/GRPO-Zero/Qwen2.5-3B-Instruct/tokenizer.json")
-
+    # tokenizer = Tokenizer("~/scratch/llms_model/GRPO-Zero/Qwen2.5-3B-Instruct/tokenizer.json")
+    tokenizer = Tokenizer("/iridisfs/scratch/mh1f25/llms_model/GRPO-Zero/Qwen2.5-3B-Instruct/tokenizer.json")
     train_dataset = CountdownTasksDataset(
         data_path="./Countdown-Tasks-3to4/",
         tokenizer=tokenizer,
@@ -109,7 +109,7 @@ def main():
     )
 
     start_time = time.time()
-    ckpt_dir = Path("~/scratch/llms_model/GRPO-Zero/Qwen2.5-3B-Instruct_ckpt")
+    ckpt_dir = Path("~/scratch/llms_model/GRPO-Zero/Qwen2.5-3B-Instruct_ckpt").expanduser()
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     for step, batch in enumerate(train_dataloader, start=1):
