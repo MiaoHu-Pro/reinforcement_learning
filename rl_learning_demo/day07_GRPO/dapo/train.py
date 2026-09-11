@@ -225,3 +225,15 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    # Issue: [W911 10:43:16.933559310 CUDACachingAllocator.cpp:3934] memory allocation failed with OOM on device 0 while trying to allocate 1281359872 bytes (free: 482213888, total: 85094825984).
+
+    #  In priority order:
+    #
+    #   1. micro_batch_size:       2 → 1
+    #   2. max_gen_len:         1024 → 512
+    #   3. exact entropy:       replace with sampled-token entropy
+    #   4. remove full-logits .float()
+    #   5. rollout trajectories: 256 → 128
+    #   6. evaluation batch:      128 → 32
+    #   7. evaluation length:    2048 → 512

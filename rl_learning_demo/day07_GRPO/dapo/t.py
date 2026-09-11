@@ -6,7 +6,9 @@ from countdown_task import CountdownTasksDataset, reward_function
 from grpo import rollout
 from torch.utils.data import DataLoader
 from pprint import pprint
-t = Tokenizer("./Qwen2.5-0.5B-Instruct/tokenizer.json")
+tokenizer = Tokenizer("/iridisfs/scratch/mh1f25/llms_model/Qwen2.5-0.5B-Instruct/tokenizer.json")
+
+
 c = CountdownTasksDataset(tokenizer=t, data_path="Countdown-Tasks-3to4")
 pprint(c.encode_prefix(numbers=[1, 2, 3], target=6)["prefix"])
 print(c.encode_prefix(numbers=[1, 2, 3], target=6)["prefix_tokens"])
@@ -38,7 +40,7 @@ NUM_ANSWERS_PER_QUESTION = BATCH_SIZE // NUM_QUESTIONS_PER_BATCH
 
 train_dataset = CountdownTasksDataset(
     data_path="Countdown-Tasks-3to4",
-    tokenizer=t,
+    tokenizer=tokenizer,
     split="train",
     test_size=128,
 )
