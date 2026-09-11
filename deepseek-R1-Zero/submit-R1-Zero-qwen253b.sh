@@ -5,9 +5,12 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --partition=a100
+# The private swarm_a100 partition provides quad-A100 SXM4 nodes. This
+# implementation is single-GPU, so request one 80 GB A100 from the node.
+#SBATCH --partition=swarm_a100
 #SBATCH --gres=gpu:1
-#SBATCH --time=60:00:00
+# The partition permits at most 120 hours (five days).
+#SBATCH --time=5-00:00:00
 #SBATCH --job-name=qwen253b-r1zero
 # Submit from deepseek-R1-Zero so this relative path exists when Slurm opens it.
 #SBATCH --output=result_out/qwen253b-r1zero-%j.out
