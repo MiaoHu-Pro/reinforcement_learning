@@ -99,18 +99,18 @@ srun "${PYTHON_EXECUTABLE}" train.py \
 echo "Finished: $(date --iso-8601=seconds)"
 echo "Saved policy: ${OUTPUT_DIR}"
 
-#cd ~/scratch/dips_project/reinforcement_learning/deepseek-R1-Zero
- #
- #  sbatch submit-R1-Zero-qwen253b.sh \
- #      --max-steps 2 \
- #      --save-every 2 \
- #      --eval-every 2 \
- #      --max-new-tokens 128
- #
- #  After that succeeds, submit the full run:
- #
- #  sbatch submit-R1-Zero-qwen253b.sh
- #
- #  The default output directory is:
- #
- #  ~/scratch/llms_model/GRPO-Zero/Qwen2.5-3B-R1-Zero
+# cd ~/scratch/dips_project/reinforcement_learning/deepseek-R1-Zero
+#
+#   sbatch submit-R1-Zero-qwen253b.sh \
+#       --max-steps 2 \
+#       --save-every 2 \
+#       --eval-every 2 \
+#       --max-new-tokens 128
+#
+#  After that succeeds, submit the full run:
+#
+#  sbatch submit-R1-Zero-qwen253b.sh
+#
+#  The default output directory is:
+#
+#  ~/scratch/llms_model/GRPO-Zero/Qwen2.5-3B-R1-Zero
