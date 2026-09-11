@@ -9,7 +9,7 @@ from pprint import pprint
 tokenizer = Tokenizer("/iridisfs/scratch/mh1f25/llms_model/Qwen2.5-0.5B-Instruct/tokenizer.json")
 
 
-c = CountdownTasksDataset(tokenizer=t, data_path="Countdown-Tasks-3to4")
+c = CountdownTasksDataset(tokenizer=tokenizer, data_path="Countdown-Tasks-3to4")
 pprint(c.encode_prefix(numbers=[1, 2, 3], target=6)["prefix"])
 print(c.encode_prefix(numbers=[1, 2, 3], target=6)["prefix_tokens"])
 print(c.encode_prefix(numbers=[1, 2, 3], target=6)["prefix_token_ids"])
@@ -64,7 +64,7 @@ model = Transformer.from_pretrained(
 
 episodes = rollout(
     model=model,
-    tokenizer=t,
+    tokenizer=tokenizer,
     batch=b,
     max_gen_len=1024,
     num_answer_per_question=2,
