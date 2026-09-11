@@ -79,7 +79,6 @@ def main():
 
     current_time = datetime.now().strftime(r"%Y%m%d-%H%M%S")
     tb_writer = SummaryWriter(log_dir=f"./logs/{current_time}")
-    # tokenizer = Tokenizer("~/scratch/llms_model/GRPO-Zero/Qwen2.5-3B-Instruct/tokenizer.json")
     tokenizer = Tokenizer("/iridisfs/scratch/mh1f25/llms_model/GRPO-Zero/Qwen2.5-3B-Instruct/tokenizer.json")
     train_dataset = CountdownTasksDataset(
         data_path="./Countdown-Tasks-3to4/",
