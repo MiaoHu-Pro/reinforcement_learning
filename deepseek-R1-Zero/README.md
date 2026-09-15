@@ -24,7 +24,7 @@ The training script rejects a path containing `Instruct`. Using Qwen2.5-3B-Instr
 | `data_types.py` | `Problem` and `Episode` trajectory containers |
 | `submit-R1-Zero-qwen253b.sh` | Slurm job for one A100 80 GB |
 
-The existing `../rl_learning_demo/day07_GRPO/dapo` folder is not modified. This implementation reuses its local Countdown parquet data by default.
+The existing `../agent_rl_learning/day07_GRPO/dapo` folder is not modified. This implementation reuses its local Countdown parquet data by default.
 
 ## Training workflow
 

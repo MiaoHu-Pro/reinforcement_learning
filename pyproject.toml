@@ -14,4 +14,5 @@ dependencies = [
     "datasets>=5.0.1",
     "modelscope>=1.39.1",
     "tiktoken>=0.14.0",
+    "torchvision>=0.28.0",
 ]
