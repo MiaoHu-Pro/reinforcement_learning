@@ -36,10 +36,15 @@ class PatchEmbedding(nn.Module):
     # P_col: 补丁的列
     # P_row: 补丁的行
     def forward(self, x):
+
+        """
+        3 steps: Conv2d --> flatten --transpose
+        """
+
         # (B, C, H, W) -> (B, d_model, P_col, P_row)
-        x = self.linear_project(x)
-        x = x.flatten(2)  # (B, d_model, P_col, P_row) -> (B, d_model, P)
-        x = x.transpose(1, 2)  # (B, d_model, P) -> (B, P, d_model)
+        x = self.linear_project(x) # Conv2d
+        x = x.flatten(2)  # flatten: (B, d_model, P_col, P_row) -> (B, d_model, P)
+        x = x.transpose(1, 2) # transpose -> (B, d_model, P) -> (B, P, d_model)
         return x
 
 
@@ -213,7 +218,7 @@ img_size = (32, 32)  # 图片大小为32x32
 patch_size = (16, 16)  # 补丁的大小是16x16
 n_channels = 1  # 灰度图片通道数量为1
 n_heads = 3  # 3个注意力头
-n_layers = 3  # 3层编码器
+n_layers = 30  # 3层编码器
 batch_size = 128  # 每个批次128张图片
 epochs = 10  # 训练5个epoch
 alpha = 0.005  # 学习率5e-3
