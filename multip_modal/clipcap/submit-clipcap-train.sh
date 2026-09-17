@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --mail-user=miao.hu@soton.ac.uk
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mem=40G
+#SBATCH --mem=60G
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -79,8 +79,8 @@ echo "Saved checkpoint: ${CLIPCAP_DIR}/model.pt"
   #
   #  cd ~/scratch/dips_project/reinforcement_learning/multip_modal/clipcap
   #
-  #  TRAIN_JOB_ID=$(sbatch --parsable submit-clipcap-train.sh)
-  #  sbatch --dependency="afterok:${TRAIN_JOB_ID}" submit-clipcap-infer.sh
+#    TRAIN_JOB_ID=$(sbatch --parsable submit-clipcap-train.sh)
+#    sbatch --dependency="afterok:${TRAIN_JOB_ID}" submit-clipcap-infer.sh
   #
   #  The afterok dependency means inference starts only if training succeeds.
   #
