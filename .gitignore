@@ -3,3 +3,4 @@ old_version_rf_env/
 __pycache__/
 *.py[cod]
 /data/
+/multip_modal/clipcap/model.pt
