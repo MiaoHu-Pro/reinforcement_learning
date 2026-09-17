@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --partition=a100
 #SBATCH --gres=gpu:1
-#SBATCH --time=04:00:00
+#SBATCH --time=24:00:00
 #SBATCH --job-name=clipcap-train
 #SBATCH --output=result_out/clipcap-train-%j.out
 
@@ -32,6 +32,12 @@ export TRANSFORMERS_OFFLINE=1
 export HF_HUB_OFFLINE=1
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK}"
 
+# Hugging Face datasets仍需要一个本地Arrow cache。放到节点临时盘，避免
+# Flickr8k parquet转换产生的临时文件长期占用home目录。
+JOB_TEMP_DIR="${SLURM_TMPDIR:-/tmp}/clipcap-${SLURM_JOB_ID}"
+export HF_HOME="${JOB_TEMP_DIR}/huggingface"
+mkdir -p "${HF_HOME}"
+
 cd "${CLIPCAP_DIR}"
 
 echo "Slurm job ID: ${SLURM_JOB_ID}"
@@ -41,6 +47,7 @@ echo "Working directory: $(pwd)"
 echo "Conda environment: ${CONDA_DEFAULT_ENV}"
 echo "Pretrained language model: ${LLM_DIR}"
 echo "Output checkpoint: ${CLIPCAP_DIR}/model.pt"
+echo "Training arguments: $*"
 
 if [[ "${CONDA_DEFAULT_ENV}" != "${CONDA_ENV_NAME}" ]]; then
     echo "Expected conda environment ${CONDA_ENV_NAME}, got ${CONDA_DEFAULT_ENV}" >&2
@@ -50,7 +57,7 @@ if [[ ! -d "${LLM_DIR}" ]]; then
     echo "Pretrained GPT-2 directory is missing: ${LLM_DIR}" >&2
     exit 1
 fi
-for required_file in train.py model.py config.py clipcap_dataset.py caption_image.pkl; do
+for required_file in train.py model.py config.py clipcap_dataset.py; do
     if [[ ! -f "${required_file}" ]]; then
         echo "Required ClipCap file is missing: ${CLIPCAP_DIR}/${required_file}" >&2
         exit 1
@@ -62,9 +69,11 @@ python -c \
     "import torch, transformers; print('PyTorch:', torch.__version__); print('Transformers:', transformers.__version__); assert torch.cuda.is_available(), 'Allocated GPU is not visible'; print('GPU:', torch.cuda.get_device_name(0))"
 nvidia-smi
 
-# train.py writes model.pt in the current directory.  The cd above ensures that
+# 额外参数会原样传给train.py，例如：
+# sbatch submit-clipcap-train.sh --dataset flickr8k --epochs 20
+# train.py writes model.pt in the current directory. The cd above ensures that
 # infer.py will later read exactly the checkpoint produced by this job.
-srun python train.py
+srun python train.py "$@"
 
 if [[ ! -s "model.pt" ]]; then
     echo "Training finished without producing a non-empty model.pt" >&2
@@ -79,7 +88,7 @@ echo "Saved checkpoint: ${CLIPCAP_DIR}/model.pt"
   #
   #  cd ~/scratch/dips_project/reinforcement_learning/multip_modal/clipcap
   #
-#    TRAIN_JOB_ID=$(sbatch --parsable submit-clipcap-train.sh)
+#    TRAIN_JOB_ID=$(sbatch --parsable submit-clipcap-train.sh --dataset flickr8k --epochs 20)
 #    sbatch --dependency="afterok:${TRAIN_JOB_ID}" submit-clipcap-infer.sh
   #
   #  The afterok dependency means inference starts only if training succeeds.
@@ -100,3 +109,19 @@ echo "Saved checkpoint: ${CLIPCAP_DIR}/model.pt"
   #  ls ~/scratch/llms_model/chinese-clip-vit-base-patch16
   #
   #  The inference job performs this check before loading the model.
+#    cd ~/scratch/dips_project/reinforcement_learning/multip_modal/clipcap
+   #
+#     TRAIN_JOB_ID=$(sbatch --parsable submit-clipcap-train.sh \
+#         --dataset flickr8k \
+#         --epochs 20)
+#
+#     sbatch --dependency="afterok:${TRAIN_JOB_ID}" \
+#         submit-clipcap-infer.sh
+   #
+   #  Check the captured training job ID:
+   #
+   #  echo "${TRAIN_JOB_ID}"
+   #
+   #  Monitor both jobs:
+   #
+   #  squeue -u "$USER"

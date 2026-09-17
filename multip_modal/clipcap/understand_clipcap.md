@@ -96,7 +96,29 @@ sbatch --dependency="afterok:${TRAIN_JOB_ID}" submit-clipcap-infer.sh
 
 Logs are written under `result_out/`.
 
-## 6. Scope of this demo
+## 6. Selecting the training dataset
+
+Without `--dataset`, training keeps the original two-image demonstration:
+
+```bash
+python train.py
+```
+
+The Flickr8k option loads the local training Parquet shards from
+`datasets/flickr8k/data`. Its 6,000 training images have five captions each,
+giving approximately 30,000 supervised image-caption pairs:
+
+```bash
+python train.py --dataset flickr8k
+```
+
+The first Flickr8k run uses Chinese CLIP to encode each unique image once and
+saves the normalized features under `clipcap/cache/`. Later runs reuse this
+cache. The cache is excluded from Git. Flickr8k captions are English while the
+current decoder is Chinese GPT-2, so this configuration demonstrates the SFT
+workflow but an English or multilingual causal LM should give better captions.
+
+## 7. Scope of this demo
 
 The current training data contains only two images and 38 captions. It is
 useful for understanding the connection between CLIP and GPT-2, but the model

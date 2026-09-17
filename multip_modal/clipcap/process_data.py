@@ -2,6 +2,7 @@ from PIL import Image
 import pickle
 from transformers import ChineseCLIPProcessor, ChineseCLIPModel
 from config import CLIP_MODEL_PATH
+from model import extract_chinese_clip_image_features
 
 
 def main():
@@ -15,8 +16,14 @@ def main():
     inputs_2 = processor(images=Image.open(
         "pokemon.jpeg"), return_tensors="pt")
     # 获取第一张图片的嵌入（dim: 512）
-    image_1_features = clip_model.get_image_features(**inputs_1)
-    image_2_features = clip_model.get_image_features(**inputs_2)
+    image_1_features = extract_chinese_clip_image_features(
+        clip_model,
+        **inputs_1,
+    )
+    image_2_features = extract_chinese_clip_image_features(
+        clip_model,
+        **inputs_2,
+    )
     # 除以模长，归一化
     image_1_features = image_1_features / \
         image_1_features.norm(p=2, dim=-1, keepdim=True)  # normalize

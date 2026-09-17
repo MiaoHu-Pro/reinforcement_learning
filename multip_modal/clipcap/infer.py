@@ -1,7 +1,7 @@
 from PIL import Image
 import torch
 from transformers import AutoTokenizer, ChineseCLIPModel, ChineseCLIPProcessor
-from model import ClipCaptionModel
+from model import ClipCaptionModel, extract_chinese_clip_image_features
 import torch.nn.functional as F
 from config import LLM_PATH, CLIP_MODEL_PATH, IMAGE_TOKEN_LENGTH, LLM_WORD_EMBD_DIM, device, MAX_LENGTH
 
@@ -106,8 +106,16 @@ def main():
         images=Image.open("pokemon.jpeg").convert("RGB"),
         return_tensors="pt",
     ).to(device)
-    image_1_features = clip_model.get_image_features(**inputs_1)
-    image_2_features = clip_model.get_image_features(**inputs_2)
+    # Transformers旧版直接返回Tensor；新版返回BaseModelOutputWithPooling。
+    # helper会统一取出投影后的[batch, 512]图片特征。
+    image_1_features = extract_chinese_clip_image_features(
+        clip_model,
+        **inputs_1,
+    )
+    image_2_features = extract_chinese_clip_image_features(
+        clip_model,
+        **inputs_2,
+    )
     image_1_features = image_1_features / \
         image_1_features.norm(p=2, dim=-1, keepdim=True)  # normalize
     image_2_features = image_2_features / \

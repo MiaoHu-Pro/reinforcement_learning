@@ -4,3 +4,4 @@ __pycache__/
 *.py[cod]
 /data/
 /multip_modal/clipcap/model.pt
+/multip_modal/clipcap/cache/
