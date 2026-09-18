@@ -56,7 +56,9 @@ def generate(model, image_embeds, tokenizer):
                 finish_flag[index] = True
             else:
                 caption_ids[index].append(token_id)
+        # 预测出的下一个token
         next_token_ids = torch.tensor(next_token_ids).to(device)
+        # 获取embedding
         next_token_embeds = model.gpt2.transformer.wte(
             next_token_ids).to(device).unsqueeze(1)
         # 将生成的next token拼接到上文的后面，继续生成
@@ -94,7 +96,7 @@ def main():
     ), False)
     model.eval()
 
-    # 加载clip模型
+    # 加载clip模型, convert image to 10 token
     clip_model = ChineseCLIPModel.from_pretrained(CLIP_MODEL_PATH).to(device)
     clip_model.eval()
     processor = ChineseCLIPProcessor.from_pretrained(CLIP_MODEL_PATH)

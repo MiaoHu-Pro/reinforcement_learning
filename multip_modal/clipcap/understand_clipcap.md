@@ -49,7 +49,7 @@ The last image-prefix position predicts $y_1$; the position containing $y_t$
 predicts $y_{t+1}$. Training minimizes token cross-entropy:
 
 $$
-L=-\sum_{t=1}^{T}\log p_\theta(y_t\mid v,y_{<t}).
+  L= - \sum_{t=1}^{T}\log p_\theta(y_t\mid v,y_{<t}).
 $$
 
 Padding positions are excluded from the loss. This is important because most

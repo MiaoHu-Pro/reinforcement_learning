@@ -5,3 +5,5 @@ __pycache__/
 /data/
 /multip_modal/clipcap/model.pt
 /multip_modal/clipcap/cache/
+/multip_modal/diffusion-model/outputs/
+/multip_modal/diffusion-model/result_out/*.out
