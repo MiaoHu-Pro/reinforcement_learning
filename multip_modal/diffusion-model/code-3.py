@@ -29,8 +29,6 @@ def show_images(images, rows=2, cols=10):
     plt.show()
 
 # 位置编码部分
-
-
 def _pos_encoding(time_idx, output_dim, device='cpu'):
     """针对某一个时间步time_idx进行正弦位置编码"""
     t, D = time_idx, output_dim
@@ -241,7 +239,7 @@ for epoch in range(epochs):
     cnt = 0
 
     # 每个 epoch 都生成采样的图像 =======================
-    if (epoch + 1) % 100 == 0:
+    if (epoch + 1) % 10 == 0:
         images = diffuser.sample(model)
         show_images(images)
     # ================================================

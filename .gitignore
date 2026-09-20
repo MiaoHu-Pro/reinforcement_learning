@@ -7,3 +7,10 @@ __pycache__/
 /multip_modal/clipcap/cache/
 /multip_modal/diffusion-model/outputs/
 /multip_modal/diffusion-model/result_out/*.out
+/multip_modal/cond-diffusion-model/checkpoints/
+*__pycache__/
+
+*.pt
+
+!*trained_models/*.pt
+/multip_modal/dalle2/
