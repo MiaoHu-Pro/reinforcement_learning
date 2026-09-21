@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --partition=swarm_h100
+#SBATCH --partition=a100
 #SBATCH --gres=gpu:1
 #SBATCH --time=60:00:00
 #SBATCH --job-name=dalle2-train
