@@ -165,6 +165,11 @@ small UTF-8 byte tokenizer with a 256-entry vocabulary. This removes any need
 to download a tokenizer, but a learned BPE tokenizer would model natural
 captions more efficiently.
 
+For training augmentation, `RandomResizedCrop` retains 75%-100% of each source
+image before resizing to $64\times64$. A fixed $64\times64$ crop must not be
+applied directly to the original Flickr8k image: it would often remove the
+captioned subject and corrupt the contrastive image-text pair.
+
 Flickr8k is suitable for demonstrating the workflow, not for learning a
 general-purpose text-to-image model. Six thousand training images are far too
 few for broad visual knowledge, and training CLIP from scratch compounds that

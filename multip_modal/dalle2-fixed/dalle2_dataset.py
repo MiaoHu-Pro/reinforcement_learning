@@ -62,16 +62,43 @@ def config_from_args(args: argparse.Namespace) -> FMNISTConfig:
 
 def _image_transform(config, train: bool, augment_data: bool) -> T.Compose:
     operations: list[Any] = []
-    if train and augment_data:
+
+    if config.dataset == "flickr8k" and train and augment_data:
+        # Flickr8k source images are much larger than 64x64. RandomCrop(64)
+        # before resizing would retain only a tiny, frequently irrelevant
+        # fragment and destroy the image-caption correspondence. Instead,
+        # sample a large portion (75%-100%) of the source image and resize it.
+        operations.append(
+            T.RandomResizedCrop(
+                config.img_size,
+                scale=(0.75, 1.0),
+                ratio=(0.75, 4.0 / 3.0),
+                interpolation=InterpolationMode.BICUBIC,
+                antialias=True,
+            )
+        )
         if config.prob_hflip > 0:
             operations.append(T.RandomHorizontalFlip(config.prob_hflip))
-        if config.crop_padding > 0:
-            operations.append(
-                T.RandomCrop(config.img_size, padding=config.crop_padding)
+    else:
+        # Validation is deterministic. FashionMNIST is first resized to 32x32
+        # and only then receives its conventional padded random crop.
+        operations.append(
+            T.Resize(
+                config.img_size,
+                interpolation=InterpolationMode.BICUBIC,
+                antialias=True,
             )
+        )
+        if train and augment_data:
+            if config.prob_hflip > 0:
+                operations.append(T.RandomHorizontalFlip(config.prob_hflip))
+            if config.crop_padding > 0:
+                operations.append(
+                    T.RandomCrop(config.img_size, padding=config.crop_padding)
+                )
+
     operations.extend(
         [
-            T.Resize(config.img_size, interpolation=InterpolationMode.BICUBIC),
             T.ToTensor(),
             T.Normalize(config.train_mean, config.train_std),
         ]
@@ -219,4 +246,3 @@ def get_test_set(config, mean=None, std=None):
         # test split remains untouched for final evaluation experiments.
         return Flickr8kPairs(config, split="validation", augment_data=False)
     raise ValueError(f"Unsupported dataset: {config.dataset}")
-
