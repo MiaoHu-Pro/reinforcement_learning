@@ -16,6 +16,7 @@ set -euo pipefail
 PROJECT_ROOT="${HOME}/scratch/dips_project/reinforcement_learning"
 DALLE2_DIR="${PROJECT_ROOT}/multip_modal/dalle2-fixed"
 DEFAULT_DATA_DIR="${PROJECT_ROOT}/datasets/flickr8k/data"
+DEFAULT_PRETRAINED_CLIP_DIR="${HOME}/scratch/llms_model/clip-vit-base-patch32"
 CONDA_ENV_NAME="rl_post_training_env"
 
 # Flickr8k is the default for this new workflow. Arguments appended to sbatch
@@ -24,6 +25,8 @@ CONDA_ENV_NAME="rl_post_training_env"
 DATASET="flickr8k"
 DATA_DIR="${DEFAULT_DATA_DIR}"
 DATA_DIR_WAS_SET=false
+USING_PRETRAINED_CLIP=false
+PRETRAINED_CLIP_DIR="${DEFAULT_PRETRAINED_CLIP_DIR}"
 USER_ARGS=("$@")
 for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
     case "${USER_ARGS[index]}" in
@@ -41,6 +44,15 @@ for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
             DATA_DIR="${USER_ARGS[index]#*=}"
             DATA_DIR_WAS_SET=true
             ;;
+        --using-pre-CLIP|--using-pre-clip)
+            USING_PRETRAINED_CLIP=true
+            ;;
+        --pretrained-clip-path)
+            PRETRAINED_CLIP_DIR="${USER_ARGS[index + 1]}"
+            ;;
+        --pretrained-clip-path=*)
+            PRETRAINED_CLIP_DIR="${USER_ARGS[index]#*=}"
+            ;;
     esac
 done
 
@@ -54,6 +66,9 @@ elif [[ "${DATASET}" == "flickr8k" ]]; then
 else
     echo "Unsupported dataset: ${DATASET}" >&2
     exit 1
+fi
+if [[ "${USING_PRETRAINED_CLIP}" == true ]]; then
+    CHECKPOINT_SUFFIX="${CHECKPOINT_SUFFIX}_preclip"
 fi
 
 # Make `conda activate` available in the non-interactive Slurm shell.
@@ -83,6 +98,10 @@ echo "Conda environment: ${CONDA_DEFAULT_ENV}"
 echo "Python: ${PYTHON_EXECUTABLE}"
 echo "Dataset: ${DATASET}"
 echo "Data directory: ${DATA_DIR}"
+echo "Using pretrained CLIP: ${USING_PRETRAINED_CLIP}"
+if [[ "${USING_PRETRAINED_CLIP}" == true ]]; then
+    echo "Pretrained CLIP directory: ${PRETRAINED_CLIP_DIR}"
+fi
 echo "Additional arguments: ${USER_ARGS[*]}"
 
 if [[ "${CONDA_DEFAULT_ENV}" != "${CONDA_ENV_NAME}" ]]; then
@@ -110,6 +129,10 @@ if [[ "${DATASET}" == "flickr8k" ]]; then
         exit 1
     fi
 fi
+if [[ "${USING_PRETRAINED_CLIP}" == true && ! -d "${PRETRAINED_CLIP_DIR}" ]]; then
+    echo "Pretrained CLIP directory is missing: ${PRETRAINED_CLIP_DIR}" >&2
+    exit 1
+fi
 
 mkdir -p "${HF_HOME}" "${DALLE2_DIR}/trained_models"
 
@@ -122,8 +145,12 @@ nvidia-smi
 # decoder loads the trained prior. `set -e` stops immediately if a stage fails.
 COMMON_ARGS=(--dataset "${DATASET}" --data-dir "${DATA_DIR}" --device cuda)
 
-echo "========== Stage 1/3: CLIP =========="
-srun "${PYTHON_EXECUTABLE}" train_clip.py "${COMMON_ARGS[@]}" "${USER_ARGS[@]}"
+if [[ "${USING_PRETRAINED_CLIP}" == true ]]; then
+    echo "========== Stage 1/3: frozen pretrained CLIP (training skipped) =========="
+else
+    echo "========== Stage 1/3: train custom CLIP =========="
+    srun "${PYTHON_EXECUTABLE}" train_clip.py "${COMMON_ARGS[@]}" "${USER_ARGS[@]}"
+fi
 
 echo "========== Stage 2/3: diffusion prior =========="
 srun "${PYTHON_EXECUTABLE}" train_prior.py "${COMMON_ARGS[@]}" "${USER_ARGS[@]}"
@@ -131,7 +158,11 @@ srun "${PYTHON_EXECUTABLE}" train_prior.py "${COMMON_ARGS[@]}" "${USER_ARGS[@]}"
 echo "========== Stage 3/3: diffusion decoder =========="
 srun "${PYTHON_EXECUTABLE}" train_decoder.py "${COMMON_ARGS[@]}" "${USER_ARGS[@]}"
 
-for stage in clip prior decoder; do
+CHECKPOINT_STAGES=(prior decoder)
+if [[ "${USING_PRETRAINED_CLIP}" == false ]]; then
+    CHECKPOINT_STAGES=(clip prior decoder)
+fi
+for stage in "${CHECKPOINT_STAGES[@]}"; do
     checkpoint="${DALLE2_DIR}/trained_models/${stage}_${CHECKPOINT_SUFFIX}.pt"
     if [[ ! -s "${checkpoint}" ]]; then
         echo "Training did not produce a non-empty checkpoint: ${checkpoint}" >&2

@@ -1,0 +1,28 @@
+TRAIN_JOB_ID=$(sbatch --parsable \
+  submit-dalle2-train.sh \
+  --using-pre-CLIP)
+
+sbatch --dependency="afterok:${TRAIN_JOB_ID}" \
+  submit-dalle2-infer.sh \
+  --using-pre-CLIP \
+  --prompt "an astronaut standing on the egg." \
+  --num-images 4 \
+  --output generated_images/astronaut-standing-egg.png
+
+
+sbatch submit-dalle2-infer.sh \
+--prompt "a dog running through green grass" \
+--num-images 4 \
+--output generated_images/dog_running.png
+
+
+sbatch submit-dalle2-infer.sh \
+--prompt "a man riding a bicycle" \
+--num-images 4 \
+--output generated_images/man_riding.png
+
+
+sbatch submit-dalle2-infer.sh \
+--prompt "two children playing outside" \
+--num-images 4 \
+--output generated_images/children_playing.png

@@ -133,7 +133,7 @@ if __name__=="__main__":
     args = parser.parse_args()
     config = config_from_args(args)
 
-    if not isfile(config.clip.model_location):
+    if not config.using_pretrained_clip and not isfile(config.clip.model_location):
         print("CLIP model has not been trained. Training CLIP...")
         print("Using device: ", config.device, f"({torch.cuda.get_device_name(config.device)})" if config.device.type == "cuda" else "")
         train_clip(config)
@@ -144,6 +144,8 @@ if __name__=="__main__":
         train_prior(config)
 
     print("Training Decoder...")
+    if config.using_pretrained_clip:
+        print("Using frozen pretrained CLIP:", config.pretrained_clip_path)
     print("Using device: ", config.device, f"({torch.cuda.get_device_name(config.device)})" if config.device.type == "cuda" else "")
     print("Using dataset:", config.dataset, "from", config.data_location)
     train_decoder(config)

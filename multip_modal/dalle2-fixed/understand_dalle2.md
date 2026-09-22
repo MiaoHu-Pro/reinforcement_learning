@@ -264,3 +264,52 @@ submission because Slurm opens its log file before the job begins.
 - Corrected FashionMNIST checkpoints use `_fmnist_fixed.pt`, leaving the copied
   old checkpoints untouched because their prior/decoder semantics differ.
 - Inference saves an image grid rather than requiring a graphical display.
+
+## 8. Optional pretrained CLIP mode
+
+The recommended checkpoint for this compact experiment is
+`openai/clip-vit-base-patch32`. It is an English ViT-B/32 CLIP with a
+512-dimensional shared image-text embedding. Download it once on the server:
+
+```bash
+mkdir -p ~/scratch/llms_model/clip-vit-base-patch32
+
+hf download openai/clip-vit-base-patch32 \
+  --local-dir ~/scratch/llms_model/clip-vit-base-patch32
+```
+
+Then submit training with:
+
+```bash
+TRAIN_JOB_ID=$(sbatch --parsable submit-dalle2-train.sh \
+  --using-pre-CLIP)
+
+sbatch --dependency="afterok:${TRAIN_JOB_ID}" \
+  submit-dalle2-infer.sh \
+  --using-pre-CLIP \
+  --prompt "an astronaut standing on the moon" \
+  --num-images 4
+```
+
+The flag must be present in both commands. Pretrained mode skips custom CLIP
+training, freezes the downloaded CLIP, changes the pipeline latent width from
+256 to 512, and writes:
+
+```text
+trained_models/prior_flickr8k_preclip.pt
+trained_models/decoder_flickr8k_preclip.pt
+```
+
+Without `--using-pre-CLIP`, the original workflow remains active: train the
+custom CLIP first, then train the prior and decoder using 256-dimensional
+embeddings. These modes are intentionally checkpoint-incompatible.
+
+The adapter reverses the dataset normalization, converts grayscale to RGB when
+needed, resizes to CLIP's 224x224 input, applies the official CLIP channel
+normalization, and retokenizes captions using CLIP's own tokenizer. CLIP stays
+frozen, but the prior and decoder must be retrained because their conditioning
+space and dimensionality changed.
+
+Pretrained CLIP improves prompt semantics; it does not teach the pixel decoder
+visual concepts absent from Flickr8k. High-quality open-domain generation still
+requires a much larger decoder dataset or a pretrained generative decoder.

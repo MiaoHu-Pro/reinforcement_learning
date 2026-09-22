@@ -493,9 +493,11 @@ def sample_image(config, prompt, mask, schedule_values=None, decoder=None):
             (img - (betas_t / sqrt_one_minus_alpha_bars_t)
              * pred_noise) + (sigma_t * z)
 
-        img = _clamp_to_normalized_pixel_range(img, config)
+        # Do not clamp x_t here. Forward-diffusion states are Gaussian and may
+        # legitimately exceed the final pixel range; per-step clipping creates
+        # a train/inference distribution mismatch.
 
-    return img
+    return _clamp_to_normalized_pixel_range(img, config)
 
 
 @torch.no_grad()
@@ -567,7 +569,8 @@ def sample_plot_image(config, prompt, mask, schedule_values=None, decoder=None):
             plt.imshow(display_image.detach().cpu()[0].permute(
                 1, 2, 0), cmap="gray" if config.img_channels == 1 else None)
 
-        img = _clamp_to_normalized_pixel_range(img, config)
+        # Preserve the Gaussian intermediate state. Only the visualization
+        # above and the final returned image are restricted to pixel bounds.
 
     # Add title to plot
     title, _ = tokenizer(prompt[0], mask[0],
@@ -575,4 +578,4 @@ def sample_plot_image(config, prompt, mask, schedule_values=None, decoder=None):
     plt.suptitle(f'Prompt: {title}')
     plt.show()
 
-    return img
+    return _clamp_to_normalized_pixel_range(img, config)

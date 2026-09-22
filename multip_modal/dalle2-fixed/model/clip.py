@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 from model.transformer import PatchEmbedding, TransformerBlock
 
@@ -208,3 +209,132 @@ class CLIP(nn.Module):
         loss = (loss_i + loss_t) / 2
 
         return loss
+
+
+class PretrainedCLIPAdapter(nn.Module):
+    """Frozen Hugging Face CLIP with the interface used by this project.
+
+    Dataset images arrive in this project's normalized 64x64 representation.
+    The adapter converts them back to [0, 1], resizes to the pretrained CLIP
+    resolution, and applies CLIP's own channel statistics. Text is decoded from
+    the project's byte tokens and retokenized by the pretrained CLIP tokenizer.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        from transformers import AutoTokenizer, CLIPModel
+
+        self.model = CLIPModel.from_pretrained(
+            config.pretrained_clip_path,
+            local_files_only=True,
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            config.pretrained_clip_path,
+            local_files_only=True,
+        )
+        projection_dim = int(self.model.config.projection_dim)
+        if projection_dim != config.latent_dim:
+            raise ValueError(
+                "Pretrained CLIP projection dimension does not match "
+                f"config.latent_dim: {projection_dim} != {config.latent_dim}"
+            )
+
+        self.image_size = int(self.model.config.vision_config.image_size)
+        self.register_buffer(
+            "dataset_mean",
+            torch.tensor(config.train_mean).view(1, -1, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "dataset_std",
+            torch.tensor(config.train_std).view(1, -1, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "clip_mean",
+            torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(
+                1, 3, 1, 1
+            ),
+            persistent=False,
+        )
+        self.register_buffer(
+            "clip_std",
+            torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(
+                1, 3, 1, 1
+            ),
+            persistent=False,
+        )
+
+    @staticmethod
+    def _feature_tensor(output):
+        """Support both Transformers 4.x tensors and 5.x model outputs."""
+        if isinstance(output, torch.Tensor):
+            return output
+        if hasattr(output, "pooler_output"):
+            return output.pooler_output
+        if isinstance(output, (tuple, list)) and output:
+            return output[0]
+        raise TypeError(f"Unsupported CLIP feature output: {type(output)!r}")
+
+    @staticmethod
+    def _decode_byte_text(captions, masks):
+        texts = []
+        captions_cpu = captions.detach().cpu()
+        masks_cpu = masks.detach().cpu()
+        for token_ids, mask in zip(captions_cpu, masks_cpu):
+            valid_length = int(mask.sum().item())
+            content = bytes(
+                int(token_id)
+                for token_id in token_ids[1:max(1, valid_length - 1)]
+            )
+            texts.append(content.decode("utf-8", errors="replace"))
+        return texts
+
+    def image_encoder(self, images):
+        pixels = images * self.dataset_std + self.dataset_mean
+        if pixels.shape[1] == 1:
+            pixels = pixels.repeat(1, 3, 1, 1)
+        if pixels.shape[1] != 3:
+            raise ValueError("Pretrained CLIP expects one or three image channels")
+        pixels = F.interpolate(
+            pixels,
+            size=(self.image_size, self.image_size),
+            mode="bicubic",
+            align_corners=False,
+            antialias=True,
+        ).clamp(0.0, 1.0)
+        pixels = (pixels - self.clip_mean) / self.clip_std
+        features = self._feature_tensor(
+            self.model.get_image_features(pixel_values=pixels)
+        )
+        return F.normalize(features.float(), dim=-1)
+
+    def text_encoder(self, captions, mask=None):
+        if mask is None:
+            raise ValueError("A byte-token attention mask is required")
+        texts = self._decode_byte_text(captions, mask)
+        inputs = self.tokenizer(
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=self.model.config.text_config.max_position_embeddings,
+            return_tensors="pt",
+        ).to(captions.device)
+        features = self._feature_tensor(self.model.get_text_features(**inputs))
+        return F.normalize(features.float(), dim=-1)
+
+
+def build_clip_encoder(config):
+    """Build either the local pretrained CLIP or the custom trained CLIP."""
+    if config.using_pretrained_clip:
+        return PretrainedCLIPAdapter(config).to(config.device)
+
+    clip = CLIP(config).to(config.device)
+    clip.load_state_dict(
+        torch.load(
+            config.clip.model_location,
+            map_location=config.device,
+            weights_only=True,
+        )
+    )
+    return clip

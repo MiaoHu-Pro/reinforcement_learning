@@ -33,14 +33,14 @@ def main() -> None:
 
     config = config_from_args(args)
     prompt_text = args.prompt or DEFAULT_PROMPTS[config.dataset]
+    required_checkpoints = [
+        config.prior.model_location,
+        config.decoder.model_location,
+    ]
+    if not config.using_pretrained_clip:
+        required_checkpoints.insert(0, config.clip.model_location)
     missing = [
-        path
-        for path in (
-            config.clip.model_location,
-            config.prior.model_location,
-            config.decoder.model_location,
-        )
-        if not Path(path).is_file()
+        path for path in required_checkpoints if not Path(path).is_file()
     ]
     if missing:
         raise FileNotFoundError(f"Missing trained checkpoint(s): {missing}")

@@ -90,7 +90,7 @@ class DecoderConfig:
     n_img_tokens:int = 4 # 图片特征向量要作为条件注入给注意力模块，需要转换成4个token
     # Training
     augment_data:bool = False
-    validate:bool = False
+    validate:bool = True
     num_workers:int = 0
     batch_size:int = 32
     lr:float = 5e-4
@@ -105,6 +105,12 @@ class DecoderConfig:
 @dataclass
 class FMNISTConfig:
     latent_dim:int = 256
+    # Optional frozen Hugging Face CLIP. This changes latent dimensions and is
+    # therefore checkpoint-incompatible with the from-scratch CLIP pipeline.
+    using_pretrained_clip:bool = False
+    pretrained_clip_path:str = str(
+        Path("~/scratch/llms_model/clip-vit-base-patch32").expanduser()
+    )
     # Dataset Info
     dataset:str = "fashion_mnist"
     data_location:str = str(DALLE2_DIR / "datasets")
@@ -174,6 +180,16 @@ def configure_dataset(
         raise ValueError(
             f"Unsupported dataset {dataset!r}; choose fashion_mnist or flickr8k"
         )
+
+    if config.using_pretrained_clip:
+        # openai/clip-vit-base-patch32 projects both modalities to 512 dims.
+        config.latent_dim = 512
+        config.text_seq_length = 77
+        # Frozen CLIP processes 224x224 images internally. Smaller batches are
+        # safer on a 24 GB L4 while remaining comfortable on an A100.
+        config.prior.batch_size = min(config.prior.batch_size, 32)
+        config.decoder.batch_size = min(config.decoder.batch_size, 16)
+        suffix = f"{suffix}_preclip"
 
     model_dir = DALLE2_DIR / "trained_models"
     config.clip.model_location = str(model_dir / f"clip_{suffix}.pt")

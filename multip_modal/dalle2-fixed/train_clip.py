@@ -14,6 +14,11 @@ from dalle2_dataset import (
 )
 
 def train_clip(config):
+    if config.using_pretrained_clip:
+        raise ValueError(
+            "train_clip() is only for the custom CLIP. Remove "
+            "--using-pre-CLIP or start training from train_prior.py."
+        )
     clip = CLIP(config).to(config.device)
 
     # Loading train and validation sets

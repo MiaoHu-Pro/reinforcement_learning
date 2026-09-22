@@ -13,5 +13,9 @@ Use the local Flickr8k parquet dataset by adding `--dataset flickr8k` to every
 command. Do not mix FashionMNIST and Flickr8k checkpoints; the scripts select
 separate checkpoint filenames automatically.
 
+To use a frozen local `openai/clip-vit-base-patch32` instead of training CLIP
+from scratch, add `--using-pre-CLIP` to both training and inference. This skips
+stage 1 and creates separate `_preclip.pt` prior/decoder checkpoints.
+
 See [understand_dalle2.md](understand_dalle2.md) for the model theory,
 implementation workflow, dataset details, limitations, and complete commands.

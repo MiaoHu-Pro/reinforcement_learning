@@ -49,14 +49,39 @@ def add_dataset_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Torch device such as cuda, cuda:0, or cpu.",
     )
+    parser.add_argument(
+        "--using-pre-CLIP",
+        "--using-pre-clip",
+        dest="using_pretrained_clip",
+        action="store_true",
+        help=(
+            "Use a frozen local pretrained CLIP and skip CLIP training. "
+            "This creates separate *_preclip.pt checkpoints."
+        ),
+    )
+    parser.add_argument(
+        "--pretrained-clip-path",
+        type=Path,
+        default=Path("~/scratch/llms_model/clip-vit-base-patch32"),
+        help="Local Hugging Face CLIP directory (no network download).",
+    )
 
 
 def config_from_args(args: argparse.Namespace) -> FMNISTConfig:
-    config = configure_dataset(FMNISTConfig(), args.dataset, args.data_dir)
+    config = FMNISTConfig()
+    config.using_pretrained_clip = args.using_pretrained_clip
+    config.pretrained_clip_path = str(args.pretrained_clip_path.expanduser())
+    config = configure_dataset(config, args.dataset, args.data_dir)
     if args.device is not None:
         config.device = torch.device(args.device)
     if config.device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested, but PyTorch cannot see a GPU")
+    if config.using_pretrained_clip:
+        model_path = Path(config.pretrained_clip_path)
+        if not model_path.is_dir():
+            raise FileNotFoundError(
+                f"Pretrained CLIP directory does not exist: {model_path}"
+            )
     return config
 
 

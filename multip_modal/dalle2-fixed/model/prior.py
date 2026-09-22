@@ -9,7 +9,7 @@ from data.data_utils import (
     freeze_model,
     get_schedule_values,
 )
-from model.clip import CLIP
+from model.clip import build_clip_encoder
 from model.transformer import SinusoidalPositionalEmbedding, TransformerBlock
 
 
@@ -26,14 +26,7 @@ class DiffusionPrior(nn.Module):
         super().__init__()
         self.config = config
 
-        self.clip = CLIP(config).to(config.device)
-        self.clip.load_state_dict(
-            torch.load(
-                config.clip.model_location,
-                map_location=config.device,
-                weights_only=True,
-            )
-        )
+        self.clip = build_clip_encoder(config)
         freeze_model(self.clip)
 
         self.time_mlp = nn.Sequential(
