@@ -148,6 +148,10 @@ class DiffusionPrior(nn.Module):
                 text_embeddings,
                 caption_tokens,
             )
+            if self.config.using_pretrained_clip:
+                # The adapter's training targets are unit-normalized CLIP
+                # embeddings. Keep reverse diffusion on that learned support.
+                pred_x0 = nn.functional.normalize(pred_x0, dim=-1)
 
             alpha_t = extract_and_expand(
                 schedule["alphas"], timesteps, x_t.shape

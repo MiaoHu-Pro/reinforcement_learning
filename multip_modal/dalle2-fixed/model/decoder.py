@@ -21,6 +21,59 @@ def _denormalize_for_display(image, config):
     return (image * std + mean).clamp(0.0, 1.0)
 
 
+def _reverse_diffusion_step(
+    image,
+    predicted_noise,
+    timesteps,
+    schedule_values,
+    config,
+    add_noise,
+):
+    """Take one stable DDPM posterior step using a clipped x_0 estimate.
+
+    The epsilon-form posterior used previously is algebraically correct, but a
+    small epsilon error at late diffusion times is amplified by
+    ``1 / sqrt(alpha_bar_t)``. With a small Flickr8k model this made samples
+    explode, and the final clamp produced nearly pure red/blue/white images.
+    Standard DDPM implementations commonly clip the predicted clean sample,
+    not the Gaussian intermediate state.
+    """
+    alpha_t = extract_and_expand(
+        schedule_values["alphas"], timesteps, image.shape
+    )
+    beta_t = extract_and_expand(
+        schedule_values["betas"], timesteps, image.shape
+    )
+    alpha_bar_t = extract_and_expand(
+        schedule_values["alpha_bars"], timesteps, image.shape
+    )
+    alpha_bar_prev = extract_and_expand(
+        schedule_values["alpha_bars_prev"], timesteps, image.shape
+    )
+
+    predicted_x0 = (
+        image
+        - torch.sqrt(1.0 - alpha_bar_t).clamp_min(1e-12)
+        * predicted_noise
+    ) / torch.sqrt(alpha_bar_t).clamp_min(1e-12)
+    predicted_x0 = _clamp_to_normalized_pixel_range(predicted_x0, config)
+
+    denominator = (1.0 - alpha_bar_t).clamp_min(1e-12)
+    posterior_mean = (
+        beta_t * torch.sqrt(alpha_bar_prev) / denominator * predicted_x0
+        + (1.0 - alpha_bar_prev)
+        * torch.sqrt(alpha_t)
+        / denominator
+        * image
+    )
+    if not add_noise:
+        return posterior_mean
+    sigma_t = extract_and_expand(
+        schedule_values["sigma"], timesteps, image.shape
+    )
+    return posterior_mean + sigma_t * torch.randn_like(image)
+
+
 class Downsample(nn.Module):
     def __init__(self, n_channels, kernel_size=(3, 3), stride=2, down_pool=False):
         super().__init__()
@@ -466,16 +519,6 @@ def sample_image(config, prompt, mask, schedule_values=None, decoder=None):
         # 将时间步设置为最大时间步1000
         timesteps = torch.full((B,), t, device=config.device, dtype=torch.long)
 
-        # Getting schedule values for timestep
-        sqrt_recip_alphas_t = extract_and_expand(
-            schedule_values["sqrt_recip_alphas"], timesteps, img.shape)
-        betas_t = extract_and_expand(
-            schedule_values["betas"], timesteps, img.shape)
-        sqrt_one_minus_alpha_bars_t = extract_and_expand(
-            schedule_values["sqrt_one_minus_alpha_bars"], timesteps, img.shape)
-        sigma_t = extract_and_expand(
-            schedule_values["sigma"], timesteps, img.shape)
-
         # 预测出的噪声
         pred_noise = decoder(
             img,
@@ -485,17 +528,14 @@ def sample_image(config, prompt, mask, schedule_values=None, decoder=None):
             image_embedding=image_embedding,
         )
 
-        # Generating random noise
-        z = torch.randn_like(img) if t > 0 else 0
-
-        # 计算出图片x_{t-1}
-        img = sqrt_recip_alphas_t * \
-            (img - (betas_t / sqrt_one_minus_alpha_bars_t)
-             * pred_noise) + (sigma_t * z)
-
-        # Do not clamp x_t here. Forward-diffusion states are Gaussian and may
-        # legitimately exceed the final pixel range; per-step clipping creates
-        # a train/inference distribution mismatch.
+        img = _reverse_diffusion_step(
+            img,
+            pred_noise,
+            timesteps,
+            schedule_values,
+            config,
+            add_noise=t > 0,
+        )
 
     return _clamp_to_normalized_pixel_range(img, config)
 
@@ -534,16 +574,6 @@ def sample_plot_image(config, prompt, mask, schedule_values=None, decoder=None):
         # Setting the timesteps for all the items in the batch
         timesteps = torch.full((B,), t, device=config.device, dtype=torch.long)
 
-        # Getting schedule values for timestep
-        sqrt_recip_alphas_t = extract_and_expand(
-            schedule_values["sqrt_recip_alphas"], timesteps, img.shape)
-        betas_t = extract_and_expand(
-            schedule_values["betas"], timesteps, img.shape)
-        sqrt_one_minus_alpha_bars_t = extract_and_expand(
-            schedule_values["sqrt_one_minus_alpha_bars"], timesteps, img.shape)
-        sigma_t = extract_and_expand(
-            schedule_values["sigma"], timesteps, img.shape)
-
         # Predicting noise at timestep t with decoder
         pred_noise = decoder(
             img,
@@ -553,13 +583,14 @@ def sample_plot_image(config, prompt, mask, schedule_values=None, decoder=None):
             image_embedding=image_embedding,
         )
 
-        # Generating random noise
-        z = torch.randn_like(img) if t > 0 else 0
-
-        # Calculating image at timestep t-1
-        img = sqrt_recip_alphas_t * \
-            (img - (betas_t / sqrt_one_minus_alpha_bars_t)
-             * pred_noise) + (sigma_t * z)
+        img = _reverse_diffusion_step(
+            img,
+            pred_noise,
+            timesteps,
+            schedule_values,
+            config,
+            add_noise=t > 0,
+        )
 
         # Plotting image
         if t == plot_imgs[-1]:
@@ -568,9 +599,6 @@ def sample_plot_image(config, prompt, mask, schedule_values=None, decoder=None):
             display_image = _denormalize_for_display(img, config)
             plt.imshow(display_image.detach().cpu()[0].permute(
                 1, 2, 0), cmap="gray" if config.img_channels == 1 else None)
-
-        # Preserve the Gaussian intermediate state. Only the visualization
-        # above and the final returned image are restricted to pixel bounds.
 
     # Add title to plot
     title, _ = tokenizer(prompt[0], mask[0],

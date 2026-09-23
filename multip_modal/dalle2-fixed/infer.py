@@ -56,12 +56,19 @@ def main() -> None:
     mean = torch.tensor(config.train_mean, device=images.device)[None, :, None, None]
     std = torch.tensor(config.train_std, device=images.device)[None, :, None, None]
     images = (images * std + mean).clamp(0.0, 1.0)
+    saturation = ((images <= 1e-4) | (images >= 1.0 - 1e-4)).float().mean()
 
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     save_image(images.cpu(), output, nrow=min(args.num_images, 4))
     print(f"Prompt: {prompt_text}")
     print(f"Saved {args.num_images} image(s) to: {output}")
+    print(f"Final pixel saturation: {100.0 * saturation.item():.2f}%")
+    if saturation.item() > 0.25:
+        print(
+            "WARNING: more than 25% of pixels are clipped; the sampler or "
+            "decoder may still be unstable."
+        )
 
 
 if __name__ == "__main__":

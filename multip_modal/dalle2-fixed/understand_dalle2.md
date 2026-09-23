@@ -251,6 +251,10 @@ submission because Slurm opens its log file before the job begins.
 - Unknown beta schedules now raise an error instead of failing later.
 - Reverse diffusion multiplies noise by posterior standard deviation, not
   posterior variance.
+- Pixel reverse diffusion reconstructs and clips the predicted clean image
+  $\widehat x_0$ before applying the posterior mean. It does not clip Gaussian
+  intermediate states $x_t$; this prevents late-time prediction errors from
+  exploding into saturated red/blue/white outputs.
 - The prior performs a complete reverse-diffusion trajectory rather than one
   prediction at the noisiest timestep.
 - Decoder training uses the real frozen CLIP image embedding.

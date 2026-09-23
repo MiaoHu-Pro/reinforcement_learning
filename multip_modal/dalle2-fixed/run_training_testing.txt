@@ -6,7 +6,7 @@ sbatch --dependency="afterok:${TRAIN_JOB_ID}" \
   submit-dalle2-infer.sh \
   --using-pre-CLIP \
   --prompt "an astronaut standing on the egg." \
-  --num-images 4 \
+  --num-images 5 \
   --output generated_images/astronaut-standing-egg.png
 
 
