@@ -317,3 +317,56 @@ space and dimensionality changed.
 Pretrained CLIP improves prompt semantics; it does not teach the pixel decoder
 visual concepts absent from Flickr8k. High-quality open-domain generation still
 requires a much larger decoder dataset or a pretrained generative decoder.
+
+## 9. Larger U-Net decoder
+
+The default decoder has 32 base channels and approximately 25.9 million
+trainable parameters in pretrained-CLIP mode. `--large-UNet` doubles the
+convolutional width while preserving the existing 18-residual-block depth:
+
+```text
+default: 32 -> 64  -> 128 -> 256
+large:   64 -> 128 -> 256 -> 512
+```
+
+The large decoder has approximately 63.2 million trainable parameters; its
+pixel U-Net grows from 13.1 million to 50.1 million parameters. Conditioning
+width increases from 128 to 256, and the CLIP image embedding is expanded to
+eight conditioning tokens instead of four.
+
+It reuses the already-trained frozen CLIP and diffusion prior. Submit only the
+new decoder to an 80 GB A100:
+
+```bash
+cd ~/scratch/dips_project/reinforcement_learning/multip_modal/dalle2-fixed
+
+LARGE_UNET_JOB_ID=$(sbatch --parsable \
+  submit-dalle2-large-unet-train.sh)
+```
+
+The job checks that the allocated GPU has approximately 80 GB VRAM and reads:
+
+```text
+trained_models/prior_flickr8k_preclip.pt
+```
+
+It writes the best validation checkpoint to:
+
+```text
+trained_models/decoder_flickr8k_preclip_largeunet.pt
+```
+
+Run dependent inference with both architecture-selection flags:
+
+```bash
+sbatch --dependency="afterok:${LARGE_UNET_JOB_ID}" \
+  submit-dalle2-infer.sh \
+  --using-pre-CLIP \
+  --large-UNet \
+  --prompt "a dog running through green grass" \
+  --num-images 4 \
+  --output generated_images/dog-large-unet.png
+```
+
+Omitting `--large-UNet` loads the original smaller decoder. The two checkpoint
+architectures are intentionally separate and cannot load one another.

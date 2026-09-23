@@ -65,12 +65,23 @@ def add_dataset_arguments(parser: argparse.ArgumentParser) -> None:
         default=Path("~/scratch/llms_model/clip-vit-base-patch32"),
         help="Local Hugging Face CLIP directory (no network download).",
     )
+    parser.add_argument(
+        "--large-UNet",
+        "--large-unet",
+        dest="large_unet",
+        action="store_true",
+        help=(
+            "Use the 64/128/256/512-channel decoder and a separate "
+            "*_largeunet.pt checkpoint."
+        ),
+    )
 
 
 def config_from_args(args: argparse.Namespace) -> FMNISTConfig:
     config = FMNISTConfig()
     config.using_pretrained_clip = args.using_pretrained_clip
     config.pretrained_clip_path = str(args.pretrained_clip_path.expanduser())
+    config.large_unet = args.large_unet
     config = configure_dataset(config, args.dataset, args.data_dir)
     if args.device is not None:
         config.device = torch.device(args.device)

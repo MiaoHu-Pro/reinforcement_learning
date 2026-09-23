@@ -6,3 +6,4 @@ generated_images/*.png
 *.pt
 
 !*trained_models/*.pt
+/result_out/

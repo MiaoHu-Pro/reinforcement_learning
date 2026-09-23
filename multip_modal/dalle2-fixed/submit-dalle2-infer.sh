@@ -24,6 +24,7 @@ DATA_DIR="${DEFAULT_DATA_DIR}"
 DATA_DIR_WAS_SET=false
 USING_PRETRAINED_CLIP=false
 PRETRAINED_CLIP_DIR="${DEFAULT_PRETRAINED_CLIP_DIR}"
+LARGE_UNET=false
 USER_ARGS=("$@")
 for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
     case "${USER_ARGS[index]}" in
@@ -50,6 +51,9 @@ for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
         --pretrained-clip-path=*)
             PRETRAINED_CLIP_DIR="${USER_ARGS[index]#*=}"
             ;;
+        --large-UNet|--large-unet)
+            LARGE_UNET=true
+            ;;
     esac
 done
 
@@ -68,6 +72,10 @@ else
 fi
 if [[ "${USING_PRETRAINED_CLIP}" == true ]]; then
     CHECKPOINT_SUFFIX="${CHECKPOINT_SUFFIX}_preclip"
+fi
+DECODER_CHECKPOINT_SUFFIX="${CHECKPOINT_SUFFIX}"
+if [[ "${LARGE_UNET}" == true ]]; then
+    DECODER_CHECKPOINT_SUFFIX="${DECODER_CHECKPOINT_SUFFIX}_largeunet"
 fi
 
 CONDA_BASE="$(conda info --base)"
@@ -91,6 +99,7 @@ echo "Working directory: $(pwd)"
 echo "Conda environment: ${CONDA_DEFAULT_ENV}"
 echo "Dataset: ${DATASET}"
 echo "Using pretrained CLIP: ${USING_PRETRAINED_CLIP}"
+echo "Using large U-Net: ${LARGE_UNET}"
 echo "Additional arguments: ${USER_ARGS[*]}"
 
 if [[ "${CONDA_DEFAULT_ENV}" != "${CONDA_ENV_NAME}" ]]; then
@@ -105,12 +114,17 @@ if [[ "${USING_PRETRAINED_CLIP}" == true && ! -d "${PRETRAINED_CLIP_DIR}" ]]; th
     echo "Pretrained CLIP directory is missing: ${PRETRAINED_CLIP_DIR}" >&2
     exit 1
 fi
-CHECKPOINT_STAGES=(prior decoder)
+CHECKPOINTS=(
+    "${DALLE2_DIR}/trained_models/prior_${CHECKPOINT_SUFFIX}.pt"
+    "${DALLE2_DIR}/trained_models/decoder_${DECODER_CHECKPOINT_SUFFIX}.pt"
+)
 if [[ "${USING_PRETRAINED_CLIP}" == false ]]; then
-    CHECKPOINT_STAGES=(clip prior decoder)
+    CHECKPOINTS=(
+        "${DALLE2_DIR}/trained_models/clip_${CHECKPOINT_SUFFIX}.pt"
+        "${CHECKPOINTS[@]}"
+    )
 fi
-for stage in "${CHECKPOINT_STAGES[@]}"; do
-    checkpoint="${DALLE2_DIR}/trained_models/${stage}_${CHECKPOINT_SUFFIX}.pt"
+for checkpoint in "${CHECKPOINTS[@]}"; do
     if [[ ! -s "${checkpoint}" ]]; then
         echo "Required checkpoint is missing or empty: ${checkpoint}" >&2
         exit 1

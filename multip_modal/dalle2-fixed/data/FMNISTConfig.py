@@ -111,6 +111,7 @@ class FMNISTConfig:
     pretrained_clip_path:str = str(
         Path("~/scratch/llms_model/clip-vit-base-patch32").expanduser()
     )
+    large_unet:bool = False
     # Dataset Info
     dataset:str = "fashion_mnist"
     data_location:str = str(DALLE2_DIR / "datasets")
@@ -191,8 +192,22 @@ def configure_dataset(
         config.decoder.batch_size = min(config.decoder.batch_size, 16)
         suffix = f"{suffix}_preclip"
 
+    decoder_suffix = suffix
+    if config.large_unet:
+        # Preserve the existing depth while doubling every convolutional stage:
+        # 32/64/128/256 -> 64/128/256/512. This is substantially more capable
+        # without adding extra high-resolution attention/residual stages.
+        config.decoder.model_channels = 64
+        config.decoder.cond_channels = 256
+        config.decoder.n_img_tokens = 8
+        config.decoder.batch_size = min(config.decoder.batch_size, 16)
+        config.decoder.num_workers = max(config.decoder.num_workers, 4)
+        decoder_suffix = f"{decoder_suffix}_largeunet"
+
     model_dir = DALLE2_DIR / "trained_models"
     config.clip.model_location = str(model_dir / f"clip_{suffix}.pt")
     config.prior.model_location = str(model_dir / f"prior_{suffix}.pt")
-    config.decoder.model_location = str(model_dir / f"decoder_{suffix}.pt")
+    config.decoder.model_location = str(
+        model_dir / f"decoder_{decoder_suffix}.pt"
+    )
     return config

@@ -5,7 +5,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --partition=l4
+#SBATCH --partition=a100
 #SBATCH --gres=gpu:1
 #SBATCH --time=60:00:00
 #SBATCH --job-name=dalle2-train
@@ -27,6 +27,7 @@ DATA_DIR="${DEFAULT_DATA_DIR}"
 DATA_DIR_WAS_SET=false
 USING_PRETRAINED_CLIP=false
 PRETRAINED_CLIP_DIR="${DEFAULT_PRETRAINED_CLIP_DIR}"
+LARGE_UNET=false
 USER_ARGS=("$@")
 for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
     case "${USER_ARGS[index]}" in
@@ -53,6 +54,9 @@ for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
         --pretrained-clip-path=*)
             PRETRAINED_CLIP_DIR="${USER_ARGS[index]#*=}"
             ;;
+        --large-UNet|--large-unet)
+            LARGE_UNET=true
+            ;;
     esac
 done
 
@@ -69,6 +73,10 @@ else
 fi
 if [[ "${USING_PRETRAINED_CLIP}" == true ]]; then
     CHECKPOINT_SUFFIX="${CHECKPOINT_SUFFIX}_preclip"
+fi
+DECODER_CHECKPOINT_SUFFIX="${CHECKPOINT_SUFFIX}"
+if [[ "${LARGE_UNET}" == true ]]; then
+    DECODER_CHECKPOINT_SUFFIX="${DECODER_CHECKPOINT_SUFFIX}_largeunet"
 fi
 
 # Make `conda activate` available in the non-interactive Slurm shell.
@@ -99,6 +107,7 @@ echo "Python: ${PYTHON_EXECUTABLE}"
 echo "Dataset: ${DATASET}"
 echo "Data directory: ${DATA_DIR}"
 echo "Using pretrained CLIP: ${USING_PRETRAINED_CLIP}"
+echo "Using large U-Net: ${LARGE_UNET}"
 if [[ "${USING_PRETRAINED_CLIP}" == true ]]; then
     echo "Pretrained CLIP directory: ${PRETRAINED_CLIP_DIR}"
 fi
@@ -158,12 +167,17 @@ srun "${PYTHON_EXECUTABLE}" train_prior.py "${COMMON_ARGS[@]}" "${USER_ARGS[@]}"
 echo "========== Stage 3/3: diffusion decoder =========="
 srun "${PYTHON_EXECUTABLE}" train_decoder.py "${COMMON_ARGS[@]}" "${USER_ARGS[@]}"
 
-CHECKPOINT_STAGES=(prior decoder)
+CHECKPOINTS=(
+    "${DALLE2_DIR}/trained_models/prior_${CHECKPOINT_SUFFIX}.pt"
+    "${DALLE2_DIR}/trained_models/decoder_${DECODER_CHECKPOINT_SUFFIX}.pt"
+)
 if [[ "${USING_PRETRAINED_CLIP}" == false ]]; then
-    CHECKPOINT_STAGES=(clip prior decoder)
+    CHECKPOINTS=(
+        "${DALLE2_DIR}/trained_models/clip_${CHECKPOINT_SUFFIX}.pt"
+        "${CHECKPOINTS[@]}"
+    )
 fi
-for stage in "${CHECKPOINT_STAGES[@]}"; do
-    checkpoint="${DALLE2_DIR}/trained_models/${stage}_${CHECKPOINT_SUFFIX}.pt"
+for checkpoint in "${CHECKPOINTS[@]}"; do
     if [[ ! -s "${checkpoint}" ]]; then
         echo "Training did not produce a non-empty checkpoint: ${checkpoint}" >&2
         exit 1

@@ -19,15 +19,51 @@ from data.data_utils import get_schedule_values, forward_diffusion, tokenizer
 
 def train_decoder(config):
     train_set, mean, std = get_train_set(config, augment_data=config.decoder.augment_data)
-    train_loader = DataLoader(train_set, shuffle=True, batch_size=config.decoder.batch_size, num_workers=config.decoder.num_workers, pin_memory=config.device.type == "cuda")
+    train_loader = DataLoader(
+        train_set,
+        shuffle=True,
+        batch_size=config.decoder.batch_size,
+        num_workers=config.decoder.num_workers,
+        pin_memory=config.device.type == "cuda",
+        persistent_workers=config.decoder.num_workers > 0,
+    )
 
     if config.decoder.validate:
         val_set = get_test_set(config, mean=mean, std=std)
-        val_loader = DataLoader(val_set, shuffle=False, batch_size=config.decoder.batch_size, num_workers=config.decoder.num_workers)
+        val_loader = DataLoader(
+            val_set,
+            shuffle=False,
+            batch_size=config.decoder.batch_size,
+            num_workers=config.decoder.num_workers,
+            pin_memory=config.device.type == "cuda",
+            persistent_workers=config.decoder.num_workers > 0,
+        )
 
     schedule_values = get_schedule_values(schedule=config.decoder.schedule, max_time=config.decoder.max_time, device=config.device)
 
     decoder = Decoder(config).to(config.device)
+    trainable_parameters = sum(
+        parameter.numel()
+        for parameter in decoder.parameters()
+        if parameter.requires_grad
+    )
+    use_bf16 = (
+        config.device.type == "cuda" and torch.cuda.is_bf16_supported()
+    )
+    print(
+        "Decoder architecture:",
+        "large U-Net" if config.large_unet else "default U-Net",
+    )
+    print(
+        "Decoder channels:",
+        [
+            config.decoder.model_channels * ratio
+            for ratio in config.decoder.channel_ratios
+        ],
+    )
+    print(f"Trainable decoder parameters: {trainable_parameters:,}")
+    print(f"Decoder batch size: {config.decoder.batch_size}")
+    print(f"BF16 autocast: {use_bf16}")
 
     if config.decoder.weight_decay == 0:
         optimizer = Adam(decoder.parameters(), lr=config.decoder.lr)
@@ -51,26 +87,32 @@ def train_decoder(config):
         training_loss = 0.0
         for batch in train_loader:
             image, caption, mask = batch["image"].to(config.device), batch["caption"].to(config.device), batch["mask"].to(config.device)
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             # Calculating Loss
             # 采样时间步t
             timesteps = torch.randint(0, config.decoder.max_time, (image.shape[0],), device=config.device, dtype=torch.long)
             # 前向扩散，(x_0, t) ---> (x_t, 噪声)
             noisy_image, noise = forward_diffusion(image, schedule_values, timesteps)
-            # During decoder training DALL-E 2 conditions on the ground-truth
-            # image's frozen CLIP embedding, not a newly sampled prior output.
-            with torch.no_grad():
-                image_embedding = decoder.prior.clip.image_encoder(image)
-            # 预测的噪声
-            pred_noise = decoder(
-                noisy_image,
-                timesteps,
-                caption,
-                mask,
-                image_embedding=image_embedding,
-            )
-            loss = nn.functional.mse_loss(pred_noise, noise)
+            with torch.autocast(
+                device_type=config.device.type,
+                dtype=torch.bfloat16,
+                enabled=use_bf16,
+            ):
+                # During decoder training DALL-E 2 conditions on the ground-truth
+                # image's frozen CLIP embedding, not a newly sampled prior output.
+                with torch.no_grad():
+                    image_embedding = decoder.prior.clip.image_encoder(image)
+                pred_noise = decoder(
+                    noisy_image,
+                    timesteps,
+                    caption,
+                    mask,
+                    image_embedding=image_embedding,
+                )
+                loss = nn.functional.mse_loss(
+                    pred_noise.float(), noise.float()
+                )
             loss.backward()
 
             torch.nn.utils.clip_grad_norm_(decoder.parameters(), max_norm=config.decoder.grad_max_norm)
@@ -94,15 +136,22 @@ def train_decoder(config):
 
                     timesteps = torch.randint(0, config.decoder.max_time, (image.shape[0],), device=config.device, dtype=torch.long)
                     noisy_image, noise = forward_diffusion(image, schedule_values, timesteps)
-                    image_embedding = decoder.prior.clip.image_encoder(image)
-                    pred_noise = decoder(
-                        noisy_image,
-                        timesteps,
-                        caption,
-                        mask,
-                        image_embedding=image_embedding,
-                    )
-                    loss = nn.functional.mse_loss(pred_noise, noise)
+                    with torch.autocast(
+                        device_type=config.device.type,
+                        dtype=torch.bfloat16,
+                        enabled=use_bf16,
+                    ):
+                        image_embedding = decoder.prior.clip.image_encoder(image)
+                        pred_noise = decoder(
+                            noisy_image,
+                            timesteps,
+                            caption,
+                            mask,
+                            image_embedding=image_embedding,
+                        )
+                        loss = nn.functional.mse_loss(
+                            pred_noise.float(), noise.float()
+                        )
                     validation_loss += loss.item()
 
             validation_loss = validation_loss / len(val_loader)
