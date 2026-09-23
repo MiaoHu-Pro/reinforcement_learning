@@ -14,6 +14,8 @@ from model.decoder import sample_image
 DEFAULT_PROMPTS = {
     "fashion_mnist": "An image of a sneaker",
     "flickr8k": "a dog running through green grass",
+    "flickr30k": "a dog running through green grass",
+    "all": "a dog running through green grass",
 }
 
 

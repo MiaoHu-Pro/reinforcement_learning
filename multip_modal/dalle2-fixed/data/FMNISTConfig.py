@@ -113,18 +113,25 @@ class FMNISTConfig:
     )
     large_unet:bool = False
     # Dataset Info
-    dataset:str = "fashion_mnist"
-    data_location:str = str(DALLE2_DIR / "datasets")
-    img_size:tuple[int,int] = (32,32)
-    img_channels:int = 1
+    dataset:str = "flickr30k"
+    data_location:str = str(PROJECT_ROOT / "datasets" / "flickr30k" / "data")
+    fashion_mnist_data_location:str = str(DALLE2_DIR / "datasets")
+    flickr8k_data_location:str = str(
+        PROJECT_ROOT / "datasets" / "flickr8k" / "data"
+    )
+    flickr30k_data_location:str = str(
+        PROJECT_ROOT / "datasets" / "flickr30k" / "data"
+    )
+    img_size:tuple[int,int] = (64,64)
+    img_channels:int = 3
     vocab_size:int = 256 # 我们使用ascii码进行分词，所以词汇表大小256
     text_seq_length:int = 64 # 提示词最大序列长度为64
     # Data Augmentation / Normalization
     # 对图片进行数据增强/归一化的配置
     prob_hflip:float = 0.5
     crop_padding:int = 4
-    train_mean:list[float] = field(default_factory=lambda: [0.2855552])
-    train_std:list[float] = field(default_factory=lambda: [0.33848408])
+    train_mean:list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
+    train_std:list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
     # Training
     train_val_split:tuple[int,int] = (50000, 10000)
     device:torch.device = field(default_factory=lambda: torch.device(
@@ -153,6 +160,7 @@ def configure_dataset(
             if data_location is not None
             else DALLE2_DIR / "datasets"
         )
+        config.fashion_mnist_data_location = config.data_location
         config.img_size = (32, 32)
         config.img_channels = 1
         config.train_mean = [0.2855552]
@@ -162,24 +170,55 @@ def configure_dataset(
         # trained by the copied implementation. Keep those files untouched and
         # write the corrected pipeline to distinct checkpoint names.
         suffix = "fmnist_fixed"
-    elif dataset == "flickr8k":
+    elif dataset in {"flickr8k", "flickr30k"}:
         config.dataset = dataset
         config.data_location = str(
             Path(data_location).expanduser()
             if data_location is not None
-            else PROJECT_ROOT / "datasets" / "flickr8k" / "data"
+            else PROJECT_ROOT / "datasets" / dataset / "data"
         )
+        if dataset == "flickr8k":
+            config.flickr8k_data_location = config.data_location
+        else:
+            config.flickr30k_data_location = config.data_location
         # 64x64 keeps this from-scratch demo tractable. It is not the image
         # resolution used by the production DALL-E 2 system.
         config.img_size = (64, 64)
         config.img_channels = 3
         config.train_mean = [0.5, 0.5, 0.5]
         config.train_std = [0.5, 0.5, 0.5]
+        # The actual row counts are read from the parquet files. This field is
+        # retained only for backward compatibility with the original demo.
         config.train_val_split = (6000, 1000)
-        suffix = "flickr8k"
+        suffix = dataset
+    elif dataset == "all":
+        config.dataset = dataset
+        # In combined mode --data-dir denotes a datasets root containing only
+        # flickr8k/data and flickr30k/data. Without an override, use the
+        # repository's standard dataset locations.
+        if data_location is not None:
+            datasets_root = Path(data_location).expanduser()
+            config.data_location = str(datasets_root)
+            config.flickr8k_data_location = str(
+                datasets_root / "flickr8k" / "data"
+            )
+            config.flickr30k_data_location = str(
+                datasets_root / "flickr30k" / "data"
+            )
+        else:
+            config.data_location = str(PROJECT_ROOT / "datasets")
+
+        # Every component must expose the same tensor shape and normalization
+        # before torch can batch samples from the combined dataset.
+        config.img_size = (64, 64)
+        config.img_channels = 3
+        config.train_mean = [0.5, 0.5, 0.5]
+        config.train_std = [0.5, 0.5, 0.5]
+        suffix = "all"
     else:
         raise ValueError(
-            f"Unsupported dataset {dataset!r}; choose fashion_mnist or flickr8k"
+            f"Unsupported dataset {dataset!r}; choose fashion_mnist, "
+            "flickr8k, flickr30k, or all"
         )
 
     if config.using_pretrained_clip:

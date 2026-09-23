@@ -15,15 +15,17 @@ set -euo pipefail
 
 PROJECT_ROOT="${HOME}/scratch/dips_project/reinforcement_learning"
 DALLE2_DIR="${PROJECT_ROOT}/multip_modal/dalle2-fixed"
-DEFAULT_DATA_DIR="${PROJECT_ROOT}/datasets/flickr8k/data"
+DEFAULT_FLICKR8K_DIR="${PROJECT_ROOT}/datasets/flickr8k/data"
+DEFAULT_FLICKR30K_DIR="${PROJECT_ROOT}/datasets/flickr30k/data"
+DEFAULT_ALL_DATA_DIR="${PROJECT_ROOT}/datasets"
 DEFAULT_PRETRAINED_CLIP_DIR="${HOME}/scratch/llms_model/clip-vit-base-patch32"
 CONDA_ENV_NAME="rl_post_training_env"
 
-# Flickr8k is the default for this new workflow. Arguments appended to sbatch
+# Flickr30k is the default for this workflow. Arguments appended to sbatch
 # are forwarded to all three Python stages and therefore can override these
-# defaults, for example: --dataset fashion_mnist.
-DATASET="flickr8k"
-DATA_DIR="${DEFAULT_DATA_DIR}"
+# defaults, for example: --dataset all or --dataset flickr8k.
+DATASET="flickr30k"
+DATA_DIR="${DEFAULT_FLICKR30K_DIR}"
 DATA_DIR_WAS_SET=false
 USING_PRETRAINED_CLIP=false
 PRETRAINED_CLIP_DIR="${DEFAULT_PRETRAINED_CLIP_DIR}"
@@ -31,10 +33,10 @@ LARGE_UNET=false
 USER_ARGS=("$@")
 for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
     case "${USER_ARGS[index]}" in
-        --dataset)
+        --dataset|--data)
             DATASET="${USER_ARGS[index + 1]}"
             ;;
-        --dataset=*)
+        --dataset=*|--data=*)
             DATASET="${USER_ARGS[index]#*=}"
             ;;
         --data-dir)
@@ -60,6 +62,16 @@ for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
     esac
 done
 
+# Match the aliases accepted by the Python argument parser.
+case "${DATASET}" in
+    flick8k)
+        DATASET="flickr8k"
+        ;;
+    fashionMNIST|fashionmnist|fashion-mnist)
+        DATASET="fashion_mnist"
+        ;;
+esac
+
 if [[ "${DATASET}" == "fashion_mnist" ]]; then
     CHECKPOINT_SUFFIX="fmnist_fixed"
     if [[ "${DATA_DIR_WAS_SET}" == false ]]; then
@@ -67,6 +79,19 @@ if [[ "${DATASET}" == "fashion_mnist" ]]; then
     fi
 elif [[ "${DATASET}" == "flickr8k" ]]; then
     CHECKPOINT_SUFFIX="flickr8k"
+    if [[ "${DATA_DIR_WAS_SET}" == false ]]; then
+        DATA_DIR="${DEFAULT_FLICKR8K_DIR}"
+    fi
+elif [[ "${DATASET}" == "flickr30k" ]]; then
+    CHECKPOINT_SUFFIX="flickr30k"
+    if [[ "${DATA_DIR_WAS_SET}" == false ]]; then
+        DATA_DIR="${DEFAULT_FLICKR30K_DIR}"
+    fi
+elif [[ "${DATASET}" == "all" ]]; then
+    CHECKPOINT_SUFFIX="all"
+    if [[ "${DATA_DIR_WAS_SET}" == false ]]; then
+        DATA_DIR="${DEFAULT_ALL_DATA_DIR}"
+    fi
 else
     echo "Unsupported dataset: ${DATASET}" >&2
     exit 1
@@ -124,19 +149,24 @@ for required_file in \
         exit 1
     fi
 done
-if [[ "${DATASET}" == "flickr8k" ]]; then
-    if [[ ! -d "${DATA_DIR}" ]]; then
-        echo "Flickr8k directory is missing: ${DATA_DIR}" >&2
+check_flickr_parquet_directory() {
+    local dataset_name="$1"
+    local dataset_dir="$2"
+    if [[ ! -d "${dataset_dir}" ]]; then
+        echo "${dataset_name} directory is missing: ${dataset_dir}" >&2
         exit 1
     fi
-    if ! compgen -G "${DATA_DIR}/train-*.parquet" > /dev/null; then
-        echo "Flickr8k training parquet files are missing from ${DATA_DIR}" >&2
+    if ! compgen -G "${dataset_dir}/*.parquet" > /dev/null; then
+        echo "${dataset_name} parquet files are missing from ${dataset_dir}" >&2
         exit 1
     fi
-    if ! compgen -G "${DATA_DIR}/validation-*.parquet" > /dev/null; then
-        echo "Flickr8k validation parquet files are missing from ${DATA_DIR}" >&2
-        exit 1
-    fi
+}
+
+if [[ "${DATASET}" == "flickr8k" || "${DATASET}" == "flickr30k" ]]; then
+    check_flickr_parquet_directory "${DATASET}" "${DATA_DIR}"
+elif [[ "${DATASET}" == "all" ]]; then
+    check_flickr_parquet_directory "Flickr8k" "${DATA_DIR}/flickr8k/data"
+    check_flickr_parquet_directory "Flickr30k" "${DATA_DIR}/flickr30k/data"
 fi
 if [[ "${USING_PRETRAINED_CLIP}" == true && ! -d "${PRETRAINED_CLIP_DIR}" ]]; then
     echo "Pretrained CLIP directory is missing: ${PRETRAINED_CLIP_DIR}" >&2
@@ -152,7 +182,7 @@ nvidia-smi
 
 # The stages are deliberately sequential: prior loads the trained CLIP, and
 # decoder loads the trained prior. `set -e` stops immediately if a stage fails.
-COMMON_ARGS=(--dataset "${DATASET}" --data-dir "${DATA_DIR}" --device cuda)
+COMMON_ARGS=(--dataset "${DATASET}" --device cuda)
 
 if [[ "${USING_PRETRAINED_CLIP}" == true ]]; then
     echo "========== Stage 1/3: frozen pretrained CLIP (training skipped) =========="
@@ -207,9 +237,9 @@ echo "Finished: $(date --iso-8601=seconds)"
 #
 #  sbatch submit-dalle2-train.sh
 #
-#  Flickr8k is the default dataset. To use FashionMNIST:
+#  Flickr30k is the default dataset. To combine both Flickr datasets:
 #
-#  sbatch submit-dalle2-train.sh --dataset fashion_mnist
+#  sbatch submit-dalle2-train.sh --dataset all
 #
 #  Submit inference after training succeeds:
 #
@@ -222,7 +252,7 @@ echo "Finished: $(date --iso-8601=seconds)"
 #
 #  The default inference output is:
 #
-#  multip_modal/dalle2-fixed/generated_images/dalle2-flickr8k.png
+#  multip_modal/dalle2-fixed/generated_images/dalle2-flickr30k.png
 #
 #  You can override it:
 #

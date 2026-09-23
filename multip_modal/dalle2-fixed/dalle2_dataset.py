@@ -1,13 +1,13 @@
 """Dataset adapters for the educational DALL-E 2 pipeline.
 
-The default FashionMNIST mode preserves the original demonstration.  Passing
-``--dataset flickr8k`` to a training script reads only local parquet files from
-``datasets/flickr8k/data``; nothing is downloaded from the Hugging Face Hub.
+Flickr30k is the default. ``--dataset flickr8k`` and ``--data fashionMNIST``
+select one source, while ``--dataset all`` concatenates Flickr8k and Flickr30k.
+The natural-image datasets share the same RGB 64x64 representation.
 
-Flickr8k stores one image and five captions in each row.  During training we
-choose one of those captions at random, so an image occurs only once per epoch
-and CLIP's diagonal in-batch contrastive targets remain valid.  Validation and
-test use the first non-empty caption deterministically.
+The Flickr parquet loader supports both numbered columns (``caption_0`` ...)
+and the common list-valued ``caption``/``captions`` representation. During
+training it randomly chooses one valid caption for each image; validation uses
+the first caption deterministically.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import random
 from typing import Any
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import ConcatDataset, Dataset
 import torchvision.transforms as T
 from torchvision.datasets import FashionMNIST
 from torchvision.transforms import InterpolationMode
@@ -28,21 +28,47 @@ from data.data_utils import tokenizer
 
 
 CAPTION_COLUMNS = tuple(f"caption_{index}" for index in range(5))
-SUPPORTED_DATASETS = ("fashion_mnist", "flickr8k")
+CAPTION_CONTAINER_COLUMNS = ("caption", "captions", "sentences")
+SUPPORTED_DATASETS = (
+    "fashion_mnist",
+    "flickr8k",
+    "flickr30k",
+    "all",
+)
+
+
+def _normalize_dataset_name(value: str) -> str:
+    """Accept convenient spellings while storing one canonical name."""
+    normalized = value.strip().lower().replace("-", "_")
+    aliases = {
+        "fashionmnist": "fashion_mnist",
+        "flick8k": "flickr8k",
+    }
+    return aliases.get(normalized, normalized)
 
 
 def add_dataset_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dataset",
+        "--data",
+        dest="dataset",
+        type=_normalize_dataset_name,
         choices=SUPPORTED_DATASETS,
-        default="fashion_mnist",
-        help="Dataset to train on (default: fashion_mnist).",
+        default="flickr30k",
+        help=(
+            "Dataset to train on. 'all' combines only Flickr8k and "
+            "Flickr30k; use '--data fashionMNIST' for FashionMNIST alone "
+            "(default: flickr30k)."
+        ),
     )
     parser.add_argument(
         "--data-dir",
         type=Path,
         default=None,
-        help="Override the selected dataset directory.",
+        help=(
+            "Override the selected dataset directory. With --dataset all, "
+            "this is a root containing flickr8k/data and flickr30k/data."
+        ),
     )
     parser.add_argument(
         "--device",
@@ -96,11 +122,16 @@ def config_from_args(args: argparse.Namespace) -> FMNISTConfig:
     return config
 
 
-def _image_transform(config, train: bool, augment_data: bool) -> T.Compose:
+def _image_transform(
+    config,
+    train: bool,
+    augment_data: bool,
+    natural_image: bool,
+) -> T.Compose:
     operations: list[Any] = []
 
-    if config.dataset == "flickr8k" and train and augment_data:
-        # Flickr8k source images are much larger than 64x64. RandomCrop(64)
+    if natural_image and train and augment_data:
+        # Flickr source images are much larger than 64x64. RandomCrop(64)
         # before resizing would retain only a tiny, frequently irrelevant
         # fragment and destroy the image-caption correspondence. Instead,
         # sample a large portion (75%-100%) of the source image and resize it.
@@ -160,9 +191,15 @@ class FashionMNISTPairs(Dataset):
 
     def __init__(self, config, train: bool, augment_data: bool) -> None:
         self.text_seq_length = config.text_seq_length
-        self.transform = _image_transform(config, train, augment_data)
+        self.img_channels = config.img_channels
+        self.transform = _image_transform(
+            config,
+            train,
+            augment_data,
+            natural_image=False,
+        )
         self.dataset = FashionMNIST(
-            root=config.data_location,
+            root=config.fashion_mnist_data_location,
             train=train,
             download=train,
         )
@@ -172,6 +209,8 @@ class FashionMNISTPairs(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         image, label = self.dataset[index]
+        if self.img_channels == 3:
+            image = image.convert("RGB")
         caption, mask = tokenizer(
             self.captions[int(label)],
             text_seq_length=self.text_seq_length,
@@ -186,8 +225,8 @@ class FashionMNISTPairs(Dataset):
         return list(self.captions.values())
 
 
-class Flickr8kPairs(Dataset):
-    """Local Flickr8k parquet image-caption pairs.
+class FlickrPairs(Dataset):
+    """Local Flickr8k/Flickr30k parquet image-caption pairs.
 
     One row is one unique image. Training randomly selects one of its five
     captions on every access; evaluation always selects the first valid one.
@@ -196,26 +235,75 @@ class Flickr8kPairs(Dataset):
     def __init__(
         self,
         config,
+        dataset_name: str,
+        data_location: str | Path,
         split: str,
         augment_data: bool = False,
     ) -> None:
         from datasets import load_dataset
 
-        data_dir = Path(config.data_location).expanduser().resolve()
-        files = sorted(data_dir.glob(f"{split}-*.parquet"))
+        self.dataset_name = dataset_name
+        data_dir = Path(data_location).expanduser().resolve()
+        split_aliases = {
+            "train": ("train",),
+            "validation": ("validation", "val", "dev"),
+            "test": ("test",),
+        }[split]
+        files = sorted(
+            {
+                path
+                for alias in split_aliases
+                for path in data_dir.glob(f"{alias}-*.parquet")
+            }
+        )
+        must_filter_internal_split = not files
+        if must_filter_internal_split:
+            # Some Flickr30k parquet exports put every original split in files
+            # named test-*.parquet and retain the real split in a row column.
+            files = sorted(data_dir.glob("*.parquet"))
         if not files:
             raise FileNotFoundError(
-                f"No Flickr8k {split!r} parquet files found in {data_dir}"
+                f"No parquet files found for {dataset_name} in {data_dir}"
             )
         self.rows = load_dataset(
             "parquet",
-            data_files={split: [str(path) for path in files]},
-            split=split,
+            data_files={"records": [str(path) for path in files]},
+            split="records",
         )
-        required = {"image", *CAPTION_COLUMNS}
-        missing = required.difference(self.rows.column_names)
-        if missing:
-            raise ValueError(f"Flickr8k columns are missing: {sorted(missing)}")
+        if "split" in self.rows.column_names:
+            accepted = {value.lower() for value in split_aliases}
+            self.rows = self.rows.filter(
+                lambda row: str(row["split"]).lower() in accepted
+            )
+            if len(self.rows) == 0:
+                raise ValueError(
+                    f"The internal split column contains no {split!r} rows "
+                    f"for {dataset_name}"
+                )
+        elif must_filter_internal_split:
+            raise FileNotFoundError(
+                f"No {split!r} parquet files and no internal 'split' "
+                f"column were found for {dataset_name} in {data_dir}"
+            )
+
+        if "image" not in self.rows.column_names:
+            raise ValueError(
+                f"{dataset_name} parquet data has no 'image' column"
+            )
+        numbered_columns = tuple(
+            column for column in CAPTION_COLUMNS
+            if column in self.rows.column_names
+        )
+        container_columns = tuple(
+            column for column in CAPTION_CONTAINER_COLUMNS
+            if column in self.rows.column_names
+        )
+        self.caption_columns = numbered_columns or container_columns
+        if not self.caption_columns:
+            raise ValueError(
+                f"{dataset_name} has no supported caption columns; found "
+                f"{self.rows.column_names}"
+            )
 
         self.training = split == "train"
         self.text_seq_length = config.text_seq_length
@@ -223,20 +311,49 @@ class Flickr8kPairs(Dataset):
             config,
             train=self.training,
             augment_data=augment_data,
+            natural_image=True,
         )
 
     def __len__(self) -> int:
         return len(self.rows)
 
     @staticmethod
-    def _valid_captions(row: dict[str, Any]) -> list[str]:
+    def _caption_strings(value: Any) -> list[str]:
+        """Flatten strings from list/dict caption representations."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = value.strip()
+            return [value] if value else []
+        if isinstance(value, dict):
+            preferred = ("raw", "sentence", "text", "caption")
+            keys = [key for key in preferred if key in value]
+            if not keys:
+                keys = list(value)
+            return [
+                text
+                for key in keys
+                for text in FlickrPairs._caption_strings(value[key])
+            ]
+        if isinstance(value, (list, tuple)):
+            return [
+                text
+                for item in value
+                for text in FlickrPairs._caption_strings(item)
+            ]
+        text = str(value).strip()
+        return [text] if text else []
+
+    def _valid_captions(self, row: dict[str, Any]) -> list[str]:
         captions = [
-            str(row[column]).strip()
-            for column in CAPTION_COLUMNS
-            if row[column] is not None and str(row[column]).strip()
+            text
+            for column in self.caption_columns
+            for text in self._caption_strings(row[column])
         ]
         if not captions:
-            raise ValueError("A Flickr8k row has no non-empty caption")
+            raise ValueError(
+                f"A {self.dataset_name} row has no non-empty caption"
+            )
         return captions
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
@@ -257,14 +374,62 @@ class Flickr8kPairs(Dataset):
         ]
 
 
+class Flickr8kPairs(FlickrPairs):
+    """Backward-compatible Flickr8k-only constructor."""
+
+    def __init__(self, config, split: str, augment_data: bool = False) -> None:
+        super().__init__(
+            config,
+            dataset_name="flickr8k",
+            data_location=config.flickr8k_data_location,
+            split=split,
+            augment_data=augment_data,
+        )
+
+
+class CombinedPairs(ConcatDataset):
+    """Concatenate compatible datasets while preserving helper methods."""
+
+    def sample_texts(self, count: int = 10) -> list[str]:
+        texts: list[str] = []
+        for dataset in self.datasets:
+            if hasattr(dataset, "sample_texts"):
+                texts.extend(dataset.sample_texts(count))
+            if len(texts) >= count:
+                break
+        return texts[:count]
+
+    @property
+    def captions(self) -> dict[int, str]:
+        return {
+            index: text for index, text in enumerate(self.sample_texts(100))
+        }
+
+
+def _flickr_pairs(config, dataset_name, split, augment_data=False):
+    location = getattr(config, f"{dataset_name}_data_location")
+    return FlickrPairs(
+        config,
+        dataset_name=dataset_name,
+        data_location=location,
+        split=split,
+        augment_data=augment_data,
+    )
+
+
 def get_train_set(config, augment_data: bool = False):
     if config.dataset == "fashion_mnist":
         dataset = FashionMNISTPairs(config, train=True, augment_data=augment_data)
-    elif config.dataset == "flickr8k":
-        dataset = Flickr8kPairs(
-            config,
-            split="train",
-            augment_data=augment_data,
+    elif config.dataset in {"flickr8k", "flickr30k"}:
+        dataset = _flickr_pairs(
+            config, config.dataset, "train", augment_data
+        )
+    elif config.dataset == "all":
+        dataset = CombinedPairs(
+            [
+                _flickr_pairs(config, "flickr8k", "train", augment_data),
+                _flickr_pairs(config, "flickr30k", "train", augment_data),
+            ]
         )
     else:
         raise ValueError(f"Unsupported dataset: {config.dataset}")
@@ -277,8 +442,15 @@ def get_test_set(config, mean=None, std=None):
     del mean, std
     if config.dataset == "fashion_mnist":
         return FashionMNISTPairs(config, train=False, augment_data=False)
-    if config.dataset == "flickr8k":
+    if config.dataset in {"flickr8k", "flickr30k"}:
         # The validation split is used while fitting model stages. The held-out
         # test split remains untouched for final evaluation experiments.
-        return Flickr8kPairs(config, split="validation", augment_data=False)
+        return _flickr_pairs(config, config.dataset, "validation")
+    if config.dataset == "all":
+        return CombinedPairs(
+            [
+                _flickr_pairs(config, "flickr8k", "validation"),
+                _flickr_pairs(config, "flickr30k", "validation"),
+            ]
+        )
     raise ValueError(f"Unsupported dataset: {config.dataset}")

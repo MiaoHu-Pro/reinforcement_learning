@@ -1,7 +1,7 @@
 """Backward-compatible dataset imports.
 
-The implementations now live in :mod:`dalle2_dataset`, which supports both
-FashionMNIST and the local Flickr8k parquet dataset.
+The implementations now live in :mod:`dalle2_dataset`, which supports
+FashionMNIST, local Flickr8k/Flickr30k parquet data, and combined mode.
 """
 
 from dalle2_dataset import (  # noqa: F401

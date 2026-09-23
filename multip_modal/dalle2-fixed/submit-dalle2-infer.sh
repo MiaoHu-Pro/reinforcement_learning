@@ -15,12 +15,14 @@ set -euo pipefail
 
 PROJECT_ROOT="${HOME}/scratch/dips_project/reinforcement_learning"
 DALLE2_DIR="${PROJECT_ROOT}/multip_modal/dalle2-fixed"
-DEFAULT_DATA_DIR="${PROJECT_ROOT}/datasets/flickr8k/data"
+DEFAULT_FLICKR8K_DIR="${PROJECT_ROOT}/datasets/flickr8k/data"
+DEFAULT_FLICKR30K_DIR="${PROJECT_ROOT}/datasets/flickr30k/data"
+DEFAULT_ALL_DATA_DIR="${PROJECT_ROOT}/datasets"
 DEFAULT_PRETRAINED_CLIP_DIR="${HOME}/scratch/llms_model/clip-vit-base-patch32"
 CONDA_ENV_NAME="rl_post_training_env"
 
-DATASET="flickr8k"
-DATA_DIR="${DEFAULT_DATA_DIR}"
+DATASET="flickr30k"
+DATA_DIR="${DEFAULT_FLICKR30K_DIR}"
 DATA_DIR_WAS_SET=false
 USING_PRETRAINED_CLIP=false
 PRETRAINED_CLIP_DIR="${DEFAULT_PRETRAINED_CLIP_DIR}"
@@ -28,10 +30,10 @@ LARGE_UNET=false
 USER_ARGS=("$@")
 for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
     case "${USER_ARGS[index]}" in
-        --dataset)
+        --dataset|--data)
             DATASET="${USER_ARGS[index + 1]}"
             ;;
-        --dataset=*)
+        --dataset=*|--data=*)
             DATASET="${USER_ARGS[index]#*=}"
             ;;
         --data-dir)
@@ -57,6 +59,16 @@ for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
     esac
 done
 
+# Match the aliases accepted by the Python argument parser.
+case "${DATASET}" in
+    flick8k)
+        DATASET="flickr8k"
+        ;;
+    fashionMNIST|fashionmnist|fashion-mnist)
+        DATASET="fashion_mnist"
+        ;;
+esac
+
 if [[ "${DATASET}" == "fashion_mnist" ]]; then
     CHECKPOINT_SUFFIX="fmnist_fixed"
     DEFAULT_OUTPUT="${DALLE2_DIR}/generated_images/dalle2-fashion-mnist.png"
@@ -66,6 +78,21 @@ if [[ "${DATASET}" == "fashion_mnist" ]]; then
 elif [[ "${DATASET}" == "flickr8k" ]]; then
     CHECKPOINT_SUFFIX="flickr8k"
     DEFAULT_OUTPUT="${DALLE2_DIR}/generated_images/dalle2-flickr8k.png"
+    if [[ "${DATA_DIR_WAS_SET}" == false ]]; then
+        DATA_DIR="${DEFAULT_FLICKR8K_DIR}"
+    fi
+elif [[ "${DATASET}" == "flickr30k" ]]; then
+    CHECKPOINT_SUFFIX="flickr30k"
+    DEFAULT_OUTPUT="${DALLE2_DIR}/generated_images/dalle2-flickr30k.png"
+    if [[ "${DATA_DIR_WAS_SET}" == false ]]; then
+        DATA_DIR="${DEFAULT_FLICKR30K_DIR}"
+    fi
+elif [[ "${DATASET}" == "all" ]]; then
+    CHECKPOINT_SUFFIX="all"
+    DEFAULT_OUTPUT="${DALLE2_DIR}/generated_images/dalle2-all.png"
+    if [[ "${DATA_DIR_WAS_SET}" == false ]]; then
+        DATA_DIR="${DEFAULT_ALL_DATA_DIR}"
+    fi
 else
     echo "Unsupported dataset: ${DATASET}" >&2
     exit 1
@@ -144,7 +171,6 @@ nvidia-smi
 #   --num-images 8 --output generated_images/two-dogs.png
 srun "${PYTHON_EXECUTABLE}" infer.py \
     --dataset "${DATASET}" \
-    --data-dir "${DATA_DIR}" \
     --device cuda \
     --output "${DEFAULT_OUTPUT}" \
     "${USER_ARGS[@]}"

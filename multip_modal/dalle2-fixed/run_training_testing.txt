@@ -1,40 +1,94 @@
+# Train with both natural-image datasets, pretrained CLIP, and the large U-Net.
+# `--dataset all` means Flickr8k + Flickr30k; it excludes FashionMNIST.
 LARGE_UNET_JOB_ID=$(sbatch --parsable \
-  submit-dalle2-large-unet-train.sh \
-  --using-pre-CLIP)
+  submit-dalle2-train.sh \
+  --dataset all \
+  --using-pre-CLIP \
+  --large-UNet)
 
- sbatch --dependency="afterok:${LARGE_UNET_JOB_ID}" \
-      submit-dalle2-infer.sh \
-      --using-pre-CLIP \
-      --large-UNet \
-      --prompt "a dog running through green grass" \
-      --num-images 4 \
-      --output generated_images/dog-large-unet.png
+# Start inference only if training succeeds. Training and inference must use
+# the same dataset, CLIP, and U-Net selection flags.
+sbatch --dependency="afterok:${LARGE_UNET_JOB_ID}" \
+  submit-dalle2-infer.sh \
+  --dataset all \
+  --using-pre-CLIP \
+  --large-UNet \
+  --prompt "two children are playing outside" \
+  --num-images 4 \
+  --output generated_images/two-children-playing-large-unet.png
 
 
-
+# Additional examples after the all-dataset large-U-Net model is trained.
+sbatch submit-dalle2-infer.sh \
+  --dataset all \
+  --using-pre-CLIP \
+  --large-UNet \
+  --prompt "an astronaut standing on an egg" \
+  --num-images 4 \
+  --output generated_images/large_UNet_astronaut-standing-egg.png
 
 sbatch submit-dalle2-infer.sh \
---prompt "an astronaut standing on the egg." \
---num-images 4 \
---using-pre-CLIP \
---output generated_images/astronaut-standing-egg.png
+  --dataset all \
+  --using-pre-CLIP \
+  --large-UNet \
+  --prompt "a dog running through green grass" \
+  --num-images 4 \
+  --output generated_images/large_UNet_dog_running.png
 
 sbatch submit-dalle2-infer.sh \
---prompt "a dog running through green grass" \
---num-images 4 \
---using-pre-CLIP \
---output generated_images/dog_running.png
-
-
-sbatch submit-dalle2-infer.sh \
---prompt "a man riding a bicycle" \
---num-images 4 \
---using-pre-CLIP \
---output generated_images/man_riding.png
-
+  --dataset all \
+  --using-pre-CLIP \
+  --large-UNet \
+  --prompt "a man riding a bicycle" \
+  --num-images 4 \
+  --output generated_images/large_UNet_man_riding.png
 
 sbatch submit-dalle2-infer.sh \
---prompt "two children playing outside" \
---num-images 4 \
---using-pre-CLIP \
---output generated_images/children_playing.png
+  --dataset all \
+  --using-pre-CLIP \
+  --large-UNet \
+  --prompt "two children playing outside" \
+  --num-images 4 \
+  --output generated_images/large_UNet_children_playing.png
+
+
+# FashionMNIST-only example. `--dataset fashion_mnist` is equivalent.
+FASHION_JOB_ID=$(sbatch --parsable \
+  submit-dalle2-train.sh \
+  --data fashionMNIST)
+
+sbatch --dependency="afterok:${FASHION_JOB_ID}" \
+  submit-dalle2-infer.sh \
+  --data fashionMNIST \
+  --prompt "An image of a sneaker" \
+  --num-images 4 \
+  --output generated_images/fashion-mnist-sneaker.png
+
+
+
+Dataset behavior is now:
+
+  - No option → Flickr30k only
+  - --dataset all → Flickr8k + Flickr30k only
+  - --dataset flickr8k or --dataset flick8k → Flickr8k only
+  - --data fashionMNIST → FashionMNIST only
+  - --dataset fashion_mnist → FashionMNIST only
+
+  I also corrected multip_modal/dalle2-fixed/run_training_testing.txt:1. The previous commands mixed a Flickr8k-specific training script with --dataset all and omitted --dataset all during inference.
+
+  The corrected main workflow is:
+
+  LARGE_UNET_JOB_ID=$(sbatch --parsable \
+    submit-dalle2-train.sh \
+    --dataset all \
+    --using-pre-CLIP \
+    --large-UNet)
+
+  sbatch --dependency="afterok:${LARGE_UNET_JOB_ID}" \
+    submit-dalle2-infer.sh \
+    --dataset all \
+    --using-pre-CLIP \
+    --large-UNet \
+    --prompt "two children are playing outside" \
+    --num-images 4 \
+    --output generated_images/two-children-playing-large-unet.png

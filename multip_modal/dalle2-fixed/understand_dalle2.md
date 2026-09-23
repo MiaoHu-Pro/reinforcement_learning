@@ -139,7 +139,7 @@ does not resample the prior at every pixel-denoising step.
 
 ## 5. Dataset choices
 
-### FashionMNIST (default)
+### FashionMNIST
 
 FashionMNIST has class labels rather than natural captions, so the loader maps
 each class to a template such as `An image of a sneaker`. Images are grayscale
@@ -176,18 +176,46 @@ few for broad visual knowledge, and training CLIP from scratch compounds that
 limitation. Generated results should be interpreted as an educational sanity
 check.
 
+### Flickr30k (default)
+
+Running a training or inference entry point without `--dataset` now selects
+Flickr30k from:
+
+```text
+datasets/flickr30k/data/
+```
+
+The loader accepts either `caption_0` ... `caption_4` columns or a list-valued
+`caption`, `captions`, or `sentences` column. It also supports Flickr30k
+exports whose parquet files contain an internal `split` column.
+
+Flickr30k contains considerably more natural image-caption pairs than
+Flickr8k, so it is the preferable single dataset for this educational model.
+It is still much smaller than datasets used to train production text-to-image
+systems.
+
+### Combined mode
+
+`--dataset all` concatenates only Flickr8k and Flickr30k. FashionMNIST is not
+included. Both Flickr sources use three-channel $64\times64$ images and the
+same normalization. Combined checkpoints use the `all` suffix and are
+incompatible with single-dataset checkpoints.
+
+FashionMNIST remains a separate demonstration selected with either
+`--dataset fashion_mnist` or the convenient alias `--data fashionMNIST`.
+
 ## 6. Training order and commands
 
 The stages must be trained in order because later stages load and freeze earlier
 checkpoints.
 
-FashionMNIST:
+Flickr30k default:
 
 ```bash
 python train_clip.py
 python train_prior.py
 python train_decoder.py
-python infer.py --prompt "An image of a sneaker" --output sneaker.png
+python infer.py --prompt "a dog running through green grass"
 ```
 
 Flickr8k:
@@ -209,6 +237,21 @@ To override the automatic project-relative data directory, append:
 --data-dir ~/scratch/dips_project/reinforcement_learning/datasets/flickr8k/data
 ```
 
+Train both Flickr datasets together:
+
+```bash
+TRAIN_JOB_ID=$(sbatch --parsable submit-dalle2-train.sh --dataset all)
+
+sbatch --dependency="afterok:${TRAIN_JOB_ID}" \
+  submit-dalle2-infer.sh \
+  --dataset all \
+  --prompt "a dog running through green grass" \
+  --num-images 4
+```
+
+For `--dataset all`, a custom `--data-dir` denotes a root directory containing
+`flickr8k/data` and `flickr30k/data`.
+
 Dataset-specific checkpoints are stored separately:
 
 ```text
@@ -219,6 +262,14 @@ trained_models/decoder_fmnist_fixed.pt
 trained_models/clip_flickr8k.pt
 trained_models/prior_flickr8k.pt
 trained_models/decoder_flickr8k.pt
+
+trained_models/clip_flickr30k.pt
+trained_models/prior_flickr30k.pt
+trained_models/decoder_flickr30k.pt
+
+trained_models/clip_all.pt
+trained_models/prior_all.pt
+trained_models/decoder_all.pt
 ```
 
 `train_prior.py` automatically trains CLIP first when its selected CLIP
@@ -240,7 +291,7 @@ sbatch --dependency="afterok:${TRAIN_JOB_ID}" \
   --num-images 4
 ```
 
-The default Slurm dataset is Flickr8k. Extra arguments are forwarded to the
+The default Slurm dataset is Flickr30k. Extra arguments are forwarded to the
 Python entry points. The tracked `result_out` directory must exist before
 submission because Slurm opens its log file before the job begins.
 

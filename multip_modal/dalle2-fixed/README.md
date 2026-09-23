@@ -6,12 +6,13 @@ Train the three dependent stages in order:
 python train_clip.py
 python train_prior.py
 python train_decoder.py
-python infer.py --prompt "An image of a sneaker" --output sneaker.png
+python infer.py --prompt "a dog running through green grass" --output dog.png
 ```
 
-Use the local Flickr8k parquet dataset by adding `--dataset flickr8k` to every
-command. Do not mix FashionMNIST and Flickr8k checkpoints; the scripts select
-separate checkpoint filenames automatically.
+Flickr30k is the default dataset. Use `--dataset flickr8k` for Flickr8k only,
+`--data fashionMNIST` for FashionMNIST only, or `--dataset all` to combine
+Flickr8k and Flickr30k. Each choice has separate checkpoints, so always pass
+the same dataset option to training and inference.
 
 To use a frozen local `openai/clip-vit-base-patch32` instead of training CLIP
 from scratch, add `--using-pre-CLIP` to both training and inference. This skips
