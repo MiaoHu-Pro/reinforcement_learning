@@ -1,4 +1,5 @@
-# Train with both natural-image datasets, pretrained CLIP, and the large U-Net.
+# Train with both natural-image datasets, pretrained CLIP, and
+ the large U-Net.
 # `--dataset all` means Flickr8k + Flickr30k; it excludes FashionMNIST.
 LARGE_UNET_JOB_ID=$(sbatch --parsable \
   submit-dalle2-train.sh \

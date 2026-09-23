@@ -30,6 +30,8 @@ from data.data_utils import tokenizer
 
 CAPTION_COLUMNS = tuple(f"caption_{index}" for index in range(5))
 CAPTION_CONTAINER_COLUMNS = ("caption", "captions", "sentences")
+MERGED_DATASET_VALIDATION_FRACTION = 0.05
+MERGED_DATASET_SPLIT_SEED = 42
 SUPPORTED_DATASETS = (
     "fashion_mnist",
     "flickr8k",
@@ -301,9 +303,32 @@ class FlickrPairs(Dataset):
                     f"for {dataset_name}"
                 )
         elif must_filter_internal_split:
-            raise FileNotFoundError(
-                f"No {split!r} parquet files and no internal 'split' "
-                f"column were found for {dataset_name} in {data_dir}"
+            if split not in {"train", "validation"}:
+                raise FileNotFoundError(
+                    f"No {split!r} parquet files and no internal 'split' "
+                    f"column were found for {dataset_name} in {data_dir}"
+                )
+
+            # lmms-lab-encoder/flickr30k publishes all 31,783 images in nine
+            # test-*.parquet files and does not preserve the original split.
+            # Create the same non-overlapping holdout on every invocation so
+            # training and validation remain reproducible across all stages.
+            partitions = self.rows.train_test_split(
+                test_size=MERGED_DATASET_VALIDATION_FRACTION,
+                seed=MERGED_DATASET_SPLIT_SEED,
+                shuffle=True,
+            )
+            partition_name = "train" if split == "train" else "test"
+            self.rows = partitions[partition_name]
+            print(
+                f"[Data:{dataset_name}] WARNING: source has one merged "
+                f"physical split and no internal split column; using a "
+                f"deterministic "
+                f"{100 * (1 - MERGED_DATASET_VALIDATION_FRACTION):.0f}%/"
+                f"{100 * MERGED_DATASET_VALIDATION_FRACTION:.0f}% "
+                f"train/validation partition (seed="
+                f"{MERGED_DATASET_SPLIT_SEED}).",
+                flush=True,
             )
 
         if "image" not in self.rows.column_names:

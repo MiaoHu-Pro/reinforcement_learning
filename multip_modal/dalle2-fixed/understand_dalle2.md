@@ -187,7 +187,11 @@ datasets/flickr30k/data/
 
 The loader accepts either `caption_0` ... `caption_4` columns or a list-valued
 `caption`, `captions`, or `sentences` column. It also supports Flickr30k
-exports whose parquet files contain an internal `split` column.
+exports whose parquet files contain an internal `split` column. The
+`lmms-lab-encoder/flickr30k` redistribution instead stores all 31,783 rows in
+nine `test-*.parquet` shards without retaining the original split. For that
+layout, the loader creates a deterministic, non-overlapping 95%/5%
+train-validation partition with seed 42.
 
 Flickr30k contains considerably more natural image-caption pairs than
 Flickr8k, so it is the preferable single dataset for this educational model.
