@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --partition=a100
 #SBATCH --gres=gpu:1
-#SBATCH --time=5-00:00:00
+#SBATCH --time=60:00:00
 #SBATCH --job-name=dalle2-large-unet
 #SBATCH --output=result_out/dalle2-large-unet-%j.out
 
