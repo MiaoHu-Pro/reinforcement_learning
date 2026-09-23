@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+from time import perf_counter
 
 import torch
 import torch.nn as nn
@@ -11,6 +12,7 @@ from torch.optim import Adam, AdamW, lr_scheduler
 from dalle2_dataset import (
     add_dataset_arguments,
     config_from_args,
+    describe_dataset,
     get_test_set,
     get_train_set,
 )
@@ -19,6 +21,7 @@ from data.data_utils import get_schedule_values, forward_diffusion, tokenizer
 
 def train_decoder(config):
     train_set, mean, std = get_train_set(config, augment_data=config.decoder.augment_data)
+    describe_dataset(train_set, "decoder train")
     train_loader = DataLoader(
         train_set,
         shuffle=True,
@@ -30,6 +33,7 @@ def train_decoder(config):
 
     if config.decoder.validate:
         val_set = get_test_set(config, mean=mean, std=std)
+        describe_dataset(val_set, "decoder validation")
         val_loader = DataLoader(
             val_set,
             shuffle=False,
@@ -50,9 +54,12 @@ def train_decoder(config):
     use_bf16 = (
         config.device.type == "cuda" and torch.cuda.is_bf16_supported()
     )
+    print("=" * 72, flush=True)
+    print("Stage: pixel diffusion-decoder training", flush=True)
     print(
         "Decoder architecture:",
         "large U-Net" if config.large_unet else "default U-Net",
+        flush=True,
     )
     print(
         "Decoder channels:",
@@ -60,10 +67,18 @@ def train_decoder(config):
             config.decoder.model_channels * ratio
             for ratio in config.decoder.channel_ratios
         ],
+        flush=True,
     )
-    print(f"Trainable decoder parameters: {trainable_parameters:,}")
-    print(f"Decoder batch size: {config.decoder.batch_size}")
-    print(f"BF16 autocast: {use_bf16}")
+    print(f"Trainable decoder parameters: {trainable_parameters:,}", flush=True)
+    print(f"Epochs: {config.decoder.epochs}", flush=True)
+    print(f"Decoder batch size: {config.decoder.batch_size}", flush=True)
+    print(f"Train batches/epoch: {len(train_loader):,}", flush=True)
+    if config.decoder.validate:
+        print(f"Validation batches/epoch: {len(val_loader):,}", flush=True)
+    print(f"Initial learning rate: {config.decoder.lr:.3e}", flush=True)
+    print(f"BF16 autocast: {use_bf16}", flush=True)
+    print(f"Checkpoint: {config.decoder.model_location}", flush=True)
+    print("=" * 72, flush=True)
 
     if config.decoder.weight_decay == 0:
         optimizer = Adam(decoder.parameters(), lr=config.decoder.lr)
@@ -81,11 +96,13 @@ def train_decoder(config):
         sample_masks = torch.stack([tokenizer(x, text_seq_length=config.text_seq_length)[1] for x in sample_texts]).to(config.device)
 
     best_loss = float('inf')
+    progress_every = max(1, len(train_loader) // 10)
     for epoch in range(config.decoder.epochs):
+        epoch_started = perf_counter()
         # Training
         decoder.train()
         training_loss = 0.0
-        for batch in train_loader:
+        for batch_index, batch in enumerate(train_loader, start=1):
             image, caption, mask = batch["image"].to(config.device), batch["caption"].to(config.device), batch["mask"].to(config.device)
             optimizer.zero_grad(set_to_none=True)
 
@@ -118,6 +135,23 @@ def train_decoder(config):
             torch.nn.utils.clip_grad_norm_(decoder.parameters(), max_norm=config.decoder.grad_max_norm)
             optimizer.step()
             training_loss += loss.item()
+            if batch_index % progress_every == 0 or batch_index == len(train_loader):
+                gpu_log = ""
+                if config.device.type == "cuda":
+                    gpu_log = (
+                        f" | GPU allocated: "
+                        f"{torch.cuda.memory_allocated(config.device) / 1024**3:.1f} GiB"
+                        f" | reserved: "
+                        f"{torch.cuda.memory_reserved(config.device) / 1024**3:.1f} GiB"
+                    )
+                print(
+                    f"[Decoder progress] Epoch {epoch + 1}/{config.decoder.epochs} "
+                    f"| Batch {batch_index:,}/{len(train_loader):,} "
+                    f"| Mean loss: {training_loss / batch_index:.5f} "
+                    f"| Elapsed: {perf_counter() - epoch_started:.1f}s"
+                    f"{gpu_log}",
+                    flush=True,
+                )
 
         training_loss = training_loss / len(train_loader)
 
@@ -162,19 +196,31 @@ def train_decoder(config):
                     parents=True, exist_ok=True
                 )
                 torch.save(decoder.state_dict(), config.decoder.model_location)
+                print(
+                    f"[Checkpoint] Decoder best validation loss "
+                    f"{best_loss:.5f}; saved to "
+                    f"{config.decoder.model_location}",
+                    flush=True,
+                )
 
-            print(f"[Epoch {epoch + 1}/{config.decoder.epochs}] Training Loss: {training_loss:.5f} | Validation Loss: {validation_loss:.5f}")
+            print(f"[Epoch {epoch + 1}/{config.decoder.epochs}] Training Loss: {training_loss:.5f} | Validation Loss: {validation_loss:.5f} | LR: {optimizer.param_groups[0]['lr']:.3e} | Time: {perf_counter() - epoch_started:.1f}s", flush=True)
         else:
             Path(config.decoder.model_location).parent.mkdir(
                 parents=True, exist_ok=True
             )
             torch.save(decoder.state_dict(), config.decoder.model_location)
-            print(f"[Epoch {epoch + 1}/{config.decoder.epochs}] Training Loss: {training_loss:.5f}")
+            print(f"[Epoch {epoch + 1}/{config.decoder.epochs}] Training Loss: {training_loss:.5f} | LR: {optimizer.param_groups[0]['lr']:.3e} | Time: {perf_counter() - epoch_started:.1f}s", flush=True)
 
         if config.decoder.sample_after_epoch:
             caption = sample_captions[None, (epoch % len(sample_captions))]
             mask = sample_masks[None, (epoch % len(sample_masks))]
             sample_plot_image(config, caption, mask, schedule_values=schedule_values, decoder=decoder)
+
+    print(
+        f"[Complete] Decoder training finished. Checkpoint: "
+        f"{config.decoder.model_location}",
+        flush=True,
+    )
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Train the DALL-E 2 decoder stage")

@@ -13,6 +13,7 @@ the first caption deterministically.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from pathlib import Path
 import random
 from typing import Any
@@ -265,12 +266,31 @@ class FlickrPairs(Dataset):
             raise FileNotFoundError(
                 f"No parquet files found for {dataset_name} in {data_dir}"
             )
+        print(
+            f"[Data:{dataset_name}] requested split={split!r} | "
+            f"directory={data_dir} | parquet shards={len(files)}",
+            flush=True,
+        )
+        print(
+            f"[Data:{dataset_name}] first shard={files[0].name} | "
+            f"last shard={files[-1].name}",
+            flush=True,
+        )
         self.rows = load_dataset(
             "parquet",
             data_files={"records": [str(path) for path in files]},
             split="records",
         )
+        loaded_rows = len(self.rows)
         if "split" in self.rows.column_names:
+            split_counts = dict(
+                sorted(Counter(map(str, self.rows["split"])).items())
+            )
+            print(
+                f"[Data:{dataset_name}] internal split counts="
+                f"{split_counts}",
+                flush=True,
+            )
             accepted = {value.lower() for value in split_aliases}
             self.rows = self.rows.filter(
                 lambda row: str(row["split"]).lower() in accepted
@@ -304,6 +324,12 @@ class FlickrPairs(Dataset):
                 f"{dataset_name} has no supported caption columns; found "
                 f"{self.rows.column_names}"
             )
+        print(
+            f"[Data:{dataset_name}] loaded rows={loaded_rows:,} | "
+            f"selected {split} rows={len(self.rows):,} | "
+            f"caption columns={list(self.caption_columns)}",
+            flush=True,
+        )
 
         self.training = split == "train"
         self.text_seq_length = config.text_seq_length
@@ -404,6 +430,18 @@ class CombinedPairs(ConcatDataset):
         return {
             index: text for index, text in enumerate(self.sample_texts(100))
         }
+
+
+def describe_dataset(dataset: Dataset, label: str) -> None:
+    """Print a compact dataset summary suitable for a Slurm output log."""
+    print(f"[Data summary] {label} total samples: {len(dataset):,}", flush=True)
+    if isinstance(dataset, CombinedPairs):
+        for component in dataset.datasets:
+            name = getattr(component, "dataset_name", type(component).__name__)
+            print(
+                f"[Data summary]   {name}: {len(component):,} samples",
+                flush=True,
+            )
 
 
 def _flickr_pairs(config, dataset_name, split, augment_data=False):

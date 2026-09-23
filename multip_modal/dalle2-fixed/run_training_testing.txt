@@ -6,6 +6,12 @@ LARGE_UNET_JOB_ID=$(sbatch --parsable \
   --using-pre-CLIP \
   --large-UNet)
 
+# Run these separately to monitor the submitted training job:
+# squeue -j "${LARGE_UNET_JOB_ID}"
+# tail -f "result_out/dalle2-train-${LARGE_UNET_JOB_ID}.out"
+# sstat -j "${LARGE_UNET_JOB_ID}.batch" \
+#   --format=JobID,Elapsed,MaxRSS,AveCPU
+
 # Start inference only if training succeeds. Training and inference must use
 # the same dataset, CLIP, and U-Net selection flags.
 sbatch --dependency="afterok:${LARGE_UNET_JOB_ID}" \

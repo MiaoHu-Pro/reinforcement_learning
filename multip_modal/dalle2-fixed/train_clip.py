@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+from time import perf_counter
 
 import torch
 from model.clip import CLIP
@@ -9,6 +10,7 @@ from torch.optim import Adam, AdamW, lr_scheduler
 from dalle2_dataset import (
     add_dataset_arguments,
     config_from_args,
+    describe_dataset,
     get_test_set,
     get_train_set,
 )
@@ -23,6 +25,7 @@ def train_clip(config):
 
     # Loading train and validation sets
     train_set, mean, std = get_train_set(config, augment_data=config.clip.augment_data)
+    describe_dataset(train_set, "CLIP train")
     train_loader = DataLoader(
         train_set,
         shuffle=True,
@@ -34,12 +37,29 @@ def train_clip(config):
 
     if config.clip.validate:
         val_set = get_test_set(config, mean=mean, std=std)
+        describe_dataset(val_set, "CLIP validation")
         val_loader = DataLoader(val_set, shuffle=False, batch_size=config.clip.batch_size, num_workers=config.clip.num_workers)
 
         # Getting dataset captions to compare images to during validation
         if config.clip.get_val_accuracy:
             val_captions = torch.stack([tokenizer(x, text_seq_length=config.text_seq_length)[0] for x in val_set.captions.values()]).to(config.device)
             val_masks = torch.stack([tokenizer(x, text_seq_length=config.text_seq_length)[1] for x in val_set.captions.values()]).to(config.device)
+
+    trainable_parameters = sum(
+        parameter.numel() for parameter in clip.parameters()
+        if parameter.requires_grad
+    )
+    print("=" * 72, flush=True)
+    print("Stage: custom CLIP training", flush=True)
+    print(f"Trainable parameters: {trainable_parameters:,}", flush=True)
+    print(f"Epochs: {config.clip.epochs}", flush=True)
+    print(f"Batch size: {config.clip.batch_size}", flush=True)
+    print(f"Train batches/epoch: {len(train_loader):,}", flush=True)
+    if config.clip.validate:
+        print(f"Validation batches/epoch: {len(val_loader):,}", flush=True)
+    print(f"Initial learning rate: {config.clip.lr:.3e}", flush=True)
+    print(f"Checkpoint: {config.clip.model_location}", flush=True)
+    print("=" * 72, flush=True)
 
     if config.clip.weight_decay == 0:
         optimizer = Adam(clip.parameters(), lr=config.clip.lr)
@@ -52,12 +72,14 @@ def train_clip(config):
     scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, config.clip.epochs - config.clip.warmup_epochs), eta_min=config.clip.lr_min)
 
     best_loss = float('inf')
+    progress_every = max(1, len(train_loader) // 10)
 
     for epoch in range(config.clip.epochs):
+        epoch_started = perf_counter()
         # Training
         clip.train()
         train_loss = 0.0
-        for batch in train_loader:
+        for batch_index, batch in enumerate(train_loader, start=1):
             images, captions, masks = batch["image"].to(config.device), batch["caption"].to(config.device), batch["mask"].to(config.device)
             optimizer.zero_grad()
             loss = clip(images, captions, masks)
@@ -65,6 +87,23 @@ def train_clip(config):
             torch.nn.utils.clip_grad_norm_(clip.parameters(), max_norm=config.clip.grad_max_norm)
             optimizer.step()
             train_loss += loss.item()
+            if batch_index % progress_every == 0 or batch_index == len(train_loader):
+                gpu_log = ""
+                if config.device.type == "cuda":
+                    gpu_log = (
+                        f" | GPU allocated: "
+                        f"{torch.cuda.memory_allocated(config.device) / 1024**3:.1f} GiB"
+                        f" | reserved: "
+                        f"{torch.cuda.memory_reserved(config.device) / 1024**3:.1f} GiB"
+                    )
+                print(
+                    f"[CLIP progress] Epoch {epoch + 1}/{config.clip.epochs} "
+                    f"| Batch {batch_index:,}/{len(train_loader):,} "
+                    f"| Mean loss: {train_loss / batch_index:.5f} "
+                    f"| Elapsed: {perf_counter() - epoch_started:.1f}s"
+                    f"{gpu_log}",
+                    flush=True,
+                )
 
         train_loss = train_loss / len(train_loader)
 
@@ -108,12 +147,17 @@ def train_clip(config):
                     parents=True, exist_ok=True
                 )
                 torch.save(clip.state_dict(), config.clip.model_location)
+                print(
+                    f"[Checkpoint] CLIP best validation loss "
+                    f"{best_loss:.5f}; saved to {config.clip.model_location}",
+                    flush=True,
+                )
 
             # Print out metrics
             if config.clip.get_val_accuracy:
-                print(f"[Epoch {epoch+1}/{config.clip.epochs}] Training Loss: {train_loss:.3f} | Validation Loss: {val_loss:.3f} | Validation Accuracy: {100 * correct / total:.2f}")
+                print(f"[Epoch {epoch+1}/{config.clip.epochs}] Training Loss: {train_loss:.3f} | Validation Loss: {val_loss:.3f} | Validation Accuracy: {100 * correct / total:.2f} | LR: {optimizer.param_groups[0]['lr']:.3e} | Time: {perf_counter() - epoch_started:.1f}s", flush=True)
             else:
-                print(f"[Epoch {epoch+1}/{config.clip.epochs}] Training Loss: {train_loss:.3f} | Validation Loss: {val_loss:.3f}")
+                print(f"[Epoch {epoch+1}/{config.clip.epochs}] Training Loss: {train_loss:.3f} | Validation Loss: {val_loss:.3f} | LR: {optimizer.param_groups[0]['lr']:.3e} | Time: {perf_counter() - epoch_started:.1f}s", flush=True)
         else:
             # Save model
             Path(config.clip.model_location).parent.mkdir(
@@ -122,7 +166,13 @@ def train_clip(config):
             torch.save(clip.state_dict(), config.clip.model_location)
 
             # Print out metrics
-            print(f"[Epoch {epoch+1}/{config.clip.epochs}] Training Loss: {train_loss:.3f}")
+            print(f"[Epoch {epoch+1}/{config.clip.epochs}] Training Loss: {train_loss:.3f} | LR: {optimizer.param_groups[0]['lr']:.3e} | Time: {perf_counter() - epoch_started:.1f}s", flush=True)
+
+    print(
+        f"[Complete] CLIP training finished. Checkpoint: "
+        f"{config.clip.model_location}",
+        flush=True,
+    )
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Train the DALL-E 2 CLIP stage")
