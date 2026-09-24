@@ -7,9 +7,13 @@ from model.clip import CLIP
 from data.data_utils import tokenizer
 from torch.utils.data import DataLoader
 from torch.optim import Adam, AdamW, lr_scheduler
-from dalle2_dataset import (
-    add_dataset_arguments,
+from config import (
+    add_config_arguments,
     config_from_args,
+    mark_training_stage_complete,
+    prepare_training_stage,
+)
+from dalle2_dataset import (
     describe_dataset,
     get_test_set,
     get_train_set,
@@ -21,6 +25,10 @@ def train_clip(config):
             "train_clip() is only for the custom CLIP. Remove "
             "--using-pre-CLIP or start training from train_prior.py."
         )
+    if not prepare_training_stage(
+        config, "CLIP", config.clip.model_location
+    ):
+        return
     clip = CLIP(config).to(config.device)
 
     # Loading train and validation sets
@@ -168,6 +176,7 @@ def train_clip(config):
             # Print out metrics
             print(f"[Epoch {epoch+1}/{config.clip.epochs}] Training Loss: {train_loss:.3f} | LR: {optimizer.param_groups[0]['lr']:.3e} | Time: {perf_counter() - epoch_started:.1f}s", flush=True)
 
+    mark_training_stage_complete(config, "CLIP", config.clip.model_location)
     print(
         f"[Complete] CLIP training finished. Checkpoint: "
         f"{config.clip.model_location}",
@@ -176,7 +185,7 @@ def train_clip(config):
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Train the DALL-E 2 CLIP stage")
-    add_dataset_arguments(parser)
+    add_config_arguments(parser)
     args = parser.parse_args()
     config = config_from_args(args)
     print("Using device: ", config.device, f"({torch.cuda.get_device_name(config.device)})" if config.device.type == "cuda" else "")

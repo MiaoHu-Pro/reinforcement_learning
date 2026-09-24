@@ -202,7 +202,7 @@ systems.
 
 `--dataset all` concatenates only Flickr8k and Flickr30k. FashionMNIST is not
 included. Both Flickr sources use three-channel $64\times64$ images and the
-same normalization. Combined checkpoints use the `all` suffix and are
+same normalization. Combined runs use `all` in the experiment name and are
 incompatible with single-dataset checkpoints.
 
 FashionMNIST remains a separate demonstration selected with either
@@ -248,7 +248,7 @@ TRAIN_JOB_ID=$(sbatch --parsable submit-dalle2-train.sh --dataset all)
 
 sbatch --dependency="afterok:${TRAIN_JOB_ID}" \
   submit-dalle2-infer.sh \
-  --dataset all \
+  --run-name all-customclip-base-lr5e-4 \
   --prompt "a dog running through green grass" \
   --num-images 4
 ```
@@ -256,25 +256,19 @@ sbatch --dependency="afterok:${TRAIN_JOB_ID}" \
 For `--dataset all`, a custom `--data-dir` denotes a root directory containing
 `flickr8k/data` and `flickr30k/data`.
 
-Dataset-specific checkpoints are stored separately:
+Every effective configuration has an isolated experiment directory:
 
 ```text
-trained_models/clip_fmnist_fixed.pt
-trained_models/prior_fmnist_fixed.pt
-trained_models/decoder_fmnist_fixed.pt
-
-trained_models/clip_flickr8k.pt
-trained_models/prior_flickr8k.pt
-trained_models/decoder_flickr8k.pt
-
-trained_models/clip_flickr30k.pt
-trained_models/prior_flickr30k.pt
-trained_models/decoder_flickr30k.pt
-
-trained_models/clip_all.pt
-trained_models/prior_all.pt
-trained_models/decoder_all.pt
+trained_models/all-customclip-base-lr5e-4/
+├── effective_config.json
+├── clip.pt
+├── prior.pt
+└── decoder.pt
 ```
+
+The name is generated from dataset, CLIP mode, U-Net size, and decoder
+learning rate. Use `--run-name` when changing other hyperparameters. Inference
+can then use only that run name and loads the exact saved configuration.
 
 `train_prior.py` automatically trains CLIP first when its selected CLIP
 checkpoint is absent. Similarly, `train_decoder.py` trains missing prerequisite
@@ -320,8 +314,8 @@ submission because Slurm opens its log file before the job begins.
 - Skip connections are local to each U-Net forward call.
 - Checkpoint and dataset paths no longer depend on the shell's working
   directory.
-- Corrected FashionMNIST checkpoints use `_fmnist_fixed.pt`, leaving the copied
-  old checkpoints untouched because their prior/decoder semantics differ.
+- Corrected experiments use isolated run directories, leaving copied old flat
+  checkpoints untouched because their prior/decoder semantics differ.
 - Inference saves an image grid rather than requiring a graphical display.
 
 ## 8. Optional pretrained CLIP mode
@@ -345,18 +339,19 @@ TRAIN_JOB_ID=$(sbatch --parsable submit-dalle2-train.sh \
 
 sbatch --dependency="afterok:${TRAIN_JOB_ID}" \
   submit-dalle2-infer.sh \
-  --using-pre-CLIP \
+  --run-name flickr30k-preclip-base-lr5e-4 \
   --prompt "an astronaut standing on the moon" \
   --num-images 4
 ```
 
-The flag must be present in both commands. Pretrained mode skips custom CLIP
+Pretrained mode skips custom CLIP
 training, freezes the downloaded CLIP, changes the pipeline latent width from
 256 to 512, and writes:
 
 ```text
-trained_models/prior_flickr8k_preclip.pt
-trained_models/decoder_flickr8k_preclip.pt
+trained_models/flickr30k-preclip-base-lr5e-4/effective_config.json
+trained_models/flickr30k-preclip-base-lr5e-4/prior.pt
+trained_models/flickr30k-preclip-base-lr5e-4/decoder.pt
 ```
 
 Without `--using-pre-CLIP`, the original workflow remains active: train the
@@ -389,39 +384,53 @@ pixel U-Net grows from 13.1 million to 50.1 million parameters. Conditioning
 width increases from 128 to 256, and the CLIP image embedding is expanded to
 eight conditioning tokens instead of four.
 
-It reuses the already-trained frozen CLIP and diffusion prior. Submit only the
-new decoder to an 80 GB A100:
+The recommended workflow trains the prior and large decoder together in one
+isolated experiment on an 80 GB A100:
 
 ```bash
 cd ~/scratch/dips_project/reinforcement_learning/multip_modal/dalle2-fixed
 
 LARGE_UNET_JOB_ID=$(sbatch --parsable \
-  submit-dalle2-large-unet-train.sh)
+  submit-dalle2-train.sh \
+  --dataset all \
+  --using-pre-CLIP \
+  --large-UNet)
 ```
 
-The job checks that the allocated GPU has approximately 80 GB VRAM and reads:
+It writes:
 
 ```text
-trained_models/prior_flickr8k_preclip.pt
+trained_models/all-preclip-large-lr5e-4/effective_config.json
+trained_models/all-preclip-large-lr5e-4/prior.pt
+trained_models/all-preclip-large-lr5e-4/decoder.pt
 ```
 
-It writes the best validation checkpoint to:
-
-```text
-trained_models/decoder_flickr8k_preclip_largeunet.pt
-```
-
-Run dependent inference with both architecture-selection flags:
+Run dependent inference from the saved manifest:
 
 ```bash
 sbatch --dependency="afterok:${LARGE_UNET_JOB_ID}" \
   submit-dalle2-infer.sh \
-  --using-pre-CLIP \
-  --large-UNet \
+  --run-name all-preclip-large-lr5e-4 \
   --prompt "a dog running through green grass" \
   --num-images 4 \
   --output generated_images/dog-large-unet.png
 ```
 
-Omitting `--large-UNet` loads the original smaller decoder. The two checkpoint
-architectures are intentionally separate and cannot load one another.
+Use the corresponding base-U-Net run name to load a smaller decoder. The two
+checkpoint architectures are intentionally separate and cannot load one
+another.
+
+## 10. Central configuration and experiment manifests
+
+`config.py` is the single source of truth for `CLIPConfig`, `PriorConfig`,
+`DecoderConfig`, dataset presets, CLI overrides, and checkpoint paths. Values
+are resolved in this order: dataclass defaults, selected presets, explicit CLI
+overrides, then validation.
+
+The resolved configuration is written to `effective_config.json` in the run
+directory. Inference with `--run-name` reloads that manifest, preventing a
+large-U-Net checkpoint from accidentally being loaded into the base model (or
+vice versa). By default existing checkpoints are protected; `--resume` skips
+stages that have both a checkpoint and `.complete` marker, while `--overwrite`
+explicitly replaces them. An interrupted stage may have a best checkpoint but
+no marker, so stage-level resume correctly restarts that stage from epoch 0.

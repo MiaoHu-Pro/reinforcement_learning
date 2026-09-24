@@ -269,6 +269,7 @@ class Decoder(nn.Module):
 
     def __init__(self, config):
         super().__init__()
+        self.config = config
         # Loading Prior Model
         self.prior = DiffusionPrior(config).to(config.device)
         self.prior.load_state_dict(torch.load(
@@ -431,7 +432,11 @@ class Decoder(nn.Module):
         if image_embedding is None:
             if caption is None:
                 raise ValueError("caption is required when image_embedding is absent")
-            image_embedding = self.prior.sample(caption, mask)
+            image_embedding = self.prior.sample(
+                caption,
+                mask,
+                num_candidates=self.config.prior_num_candidates,
+            )
         img_embeddings = image_embedding.to(x.device)
 
         # 将时间步t和预测的clip图片特征向量融合，作为条件注入卷积块（残差块）
@@ -503,7 +508,14 @@ def sample_image(config, prompt, mask, schedule_values=None, decoder=None):
 
     # A trajectory must use one fixed conditioning embedding. Sampling a new
     # prior output at every pixel-diffusion step makes the target move.
-    image_embedding = decoder.prior.sample(prompt, mask)
+    # Sample several candidate CLIP image embeddings and let the prior retain
+    # its best-scoring candidate. Increasing this at inference with
+    # --prior-candidates can improve prompt alignment without retraining.
+    image_embedding = decoder.prior.sample(
+        prompt,
+        mask,
+        num_candidates=config.prior_num_candidates,
+    )
 
     B = prompt.shape[0]
     # 获取纯噪声图片x_1000
@@ -552,7 +564,11 @@ def sample_plot_image(config, prompt, mask, schedule_values=None, decoder=None):
         ))
 
     decoder.eval()
-    image_embedding = decoder.prior.sample(prompt, mask)
+    image_embedding = decoder.prior.sample(
+        prompt,
+        mask,
+        num_candidates=config.prior_num_candidates,
+    )
 
     B = prompt.shape[0]
     # Get completely noisy image

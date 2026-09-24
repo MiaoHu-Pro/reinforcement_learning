@@ -13,6 +13,18 @@
 
 set -euo pipefail
 
+# Compatibility wrapper: the generic submit script now owns all configuration
+# and experiment-directory logic. Keeping this old entry point avoids breaking
+# saved commands while ensuring it cannot write the obsolete flat checkpoint
+# names below. SBATCH directives in the delegated script are comments because
+# it runs inside this already allocated job.
+echo "submit-dalle2-large-unet-train.sh is a compatibility wrapper."
+exec bash "$(dirname "$0")/submit-dalle2-train.sh" \
+    --dataset flickr8k \
+    --using-pre-CLIP \
+    --large-UNet \
+    "$@"
+
 PROJECT_ROOT="${HOME}/scratch/dips_project/reinforcement_learning"
 DALLE2_DIR="${PROJECT_ROOT}/multip_modal/dalle2-fixed"
 DATA_DIR="${PROJECT_ROOT}/datasets/flickr8k/data"

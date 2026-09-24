@@ -6,7 +6,11 @@ from pathlib import Path
 import torch
 from torchvision.utils import save_image
 
-from dalle2_dataset import add_dataset_arguments, config_from_args
+from config import (
+    add_config_arguments,
+    config_from_args,
+    training_stage_is_complete,
+)
 from data.data_utils import tokenizer
 from model.decoder import sample_image
 
@@ -21,7 +25,7 @@ DEFAULT_PROMPTS = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run DALL-E 2 inference")
-    add_dataset_arguments(parser)
+    add_config_arguments(parser)
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--num-images", type=int, default=4)
     parser.add_argument(
@@ -33,7 +37,10 @@ def main() -> None:
     if args.num_images < 1:
         parser.error("--num-images must be positive")
 
-    config = config_from_args(args)
+    # With --run-name, load the exact architecture and training parameters
+    # recorded in that run's effective_config.json. This prevents inference
+    # from accidentally constructing a different U-Net or CLIP variant.
+    config = config_from_args(args, load_existing_run=True)
     prompt_text = args.prompt or DEFAULT_PROMPTS[config.dataset]
     required_checkpoints = [
         config.prior.model_location,
@@ -41,11 +48,20 @@ def main() -> None:
     ]
     if not config.using_pretrained_clip:
         required_checkpoints.insert(0, config.clip.model_location)
-    missing = [
-        path for path in required_checkpoints if not Path(path).is_file()
+    incomplete = [
+        path
+        for path in required_checkpoints
+        if not training_stage_is_complete(path)
     ]
-    if missing:
-        raise FileNotFoundError(f"Missing trained checkpoint(s): {missing}")
+    if incomplete:
+        raise FileNotFoundError(
+            "Missing or incomplete trained stage(s); each requires a .pt "
+            f"checkpoint and .pt.complete marker: {incomplete}"
+        )
+
+    print(f"Experiment: {config.run_name}")
+    print(f"Run directory: {config.run_dir}")
+    print(f"Prior candidates per prompt: {config.prior_num_candidates}")
 
     caption, mask = tokenizer(
         prompt_text,

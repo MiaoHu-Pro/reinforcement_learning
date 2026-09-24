@@ -1,11 +1,12 @@
-# Train with both natural-image datasets, pretrained CLIP, and
- the large U-Net.
+# Train with both natural-image datasets, pretrained CLIP, and the large U-Net.
 # `--dataset all` means Flickr8k + Flickr30k; it excludes FashionMNIST.
+# The automatic experiment name will be all-preclip-large-lr2e-4.
 LARGE_UNET_JOB_ID=$(sbatch --parsable \
   submit-dalle2-train.sh \
   --dataset all \
   --using-pre-CLIP \
-  --large-UNet)
+  --large-UNet \
+  --decoder-lr 2e-4)
 
 # Run these separately to monitor the submitted training job:
 # squeue -j "${LARGE_UNET_JOB_ID}"
@@ -14,12 +15,11 @@ LARGE_UNET_JOB_ID=$(sbatch --parsable \
 #   --format=JobID,Elapsed,MaxRSS,AveCPU
 
 # Start inference only if training succeeds. Training and inference must use
-# the same dataset, CLIP, and U-Net selection flags.
+# only the saved run name; infer.py reloads its exact configuration.
 sbatch --dependency="afterok:${LARGE_UNET_JOB_ID}" \
   submit-dalle2-infer.sh \
-  --dataset all \
-  --using-pre-CLIP \
-  --large-UNet \
+  --run-name all-preclip-large-lr2e-4 \
+  --prior-candidates 8 \
   --prompt "two children are playing outside" \
   --num-images 4 \
   --output generated_images/two-children-playing-large-unet.png
@@ -27,33 +27,25 @@ sbatch --dependency="afterok:${LARGE_UNET_JOB_ID}" \
 
 # Additional examples after the all-dataset large-U-Net model is trained.
 sbatch submit-dalle2-infer.sh \
-  --dataset all \
-  --using-pre-CLIP \
-  --large-UNet \
+  --run-name all-preclip-large-lr2e-4 \
   --prompt "an astronaut standing on an egg" \
   --num-images 4 \
   --output generated_images/large_UNet_astronaut-standing-egg.png
 
 sbatch submit-dalle2-infer.sh \
-  --dataset all \
-  --using-pre-CLIP \
-  --large-UNet \
+  --run-name all-preclip-large-lr2e-4 \
   --prompt "a dog running through green grass" \
   --num-images 4 \
   --output generated_images/large_UNet_dog_running.png
 
 sbatch submit-dalle2-infer.sh \
-  --dataset all \
-  --using-pre-CLIP \
-  --large-UNet \
+  --run-name all-preclip-large-lr2e-4 \
   --prompt "a man riding a bicycle" \
   --num-images 4 \
   --output generated_images/large_UNet_man_riding.png
 
 sbatch submit-dalle2-infer.sh \
-  --dataset all \
-  --using-pre-CLIP \
-  --large-UNet \
+  --run-name all-preclip-large-lr2e-4 \
   --prompt "two children playing outside" \
   --num-images 4 \
   --output generated_images/large_UNet_children_playing.png
@@ -73,29 +65,11 @@ sbatch --dependency="afterok:${FASHION_JOB_ID}" \
 
 
 
-Dataset behavior is now:
-
-  - No option → Flickr30k only
-  - --dataset all → Flickr8k + Flickr30k only
-  - --dataset flickr8k or --dataset flick8k → Flickr8k only
-  - --data fashionMNIST → FashionMNIST only
-  - --dataset fashion_mnist → FashionMNIST only
-
-  I also corrected multip_modal/dalle2-fixed/run_training_testing.txt:1. The previous commands mixed a Flickr8k-specific training script with --dataset all and omitted --dataset all during inference.
-
-  The corrected main workflow is:
-
-  LARGE_UNET_JOB_ID=$(sbatch --parsable \
-    submit-dalle2-train.sh \
-    --dataset all \
-    --using-pre-CLIP \
-    --large-UNet)
-
-  sbatch --dependency="afterok:${LARGE_UNET_JOB_ID}" \
-    submit-dalle2-infer.sh \
-    --dataset all \
-    --using-pre-CLIP \
-    --large-UNet \
-    --prompt "two children are playing outside" \
-    --num-images 4 \
-    --output generated_images/two-children-playing-large-unet.png
+# Dataset behavior:
+#   no dataset option     -> Flickr30k only
+#   --dataset all         -> Flickr8k + Flickr30k only
+#   --dataset flickr8k    -> Flickr8k only
+#   --data fashionMNIST   -> FashionMNIST only
+#
+# Existing checkpoints are protected. Add --resume to the training command to
+# skip complete stages, or --overwrite to explicitly replace them.

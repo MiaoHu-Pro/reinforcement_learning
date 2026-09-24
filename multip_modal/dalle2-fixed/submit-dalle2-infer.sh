@@ -27,6 +27,7 @@ DATA_DIR_WAS_SET=false
 USING_PRETRAINED_CLIP=false
 PRETRAINED_CLIP_DIR="${DEFAULT_PRETRAINED_CLIP_DIR}"
 LARGE_UNET=false
+RUN_NAME=""
 USER_ARGS=("$@")
 for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
     case "${USER_ARGS[index]}" in
@@ -56,6 +57,12 @@ for ((index = 0; index < ${#USER_ARGS[@]}; index++)); do
         --large-UNet|--large-unet)
             LARGE_UNET=true
             ;;
+        --run-name)
+            RUN_NAME="${USER_ARGS[index + 1]}"
+            ;;
+        --run-name=*)
+            RUN_NAME="${USER_ARGS[index]#*=}"
+            ;;
     esac
 done
 
@@ -70,25 +77,21 @@ case "${DATASET}" in
 esac
 
 if [[ "${DATASET}" == "fashion_mnist" ]]; then
-    CHECKPOINT_SUFFIX="fmnist_fixed"
     DEFAULT_OUTPUT="${DALLE2_DIR}/generated_images/dalle2-fashion-mnist.png"
     if [[ "${DATA_DIR_WAS_SET}" == false ]]; then
         DATA_DIR="${DALLE2_DIR}/datasets"
     fi
 elif [[ "${DATASET}" == "flickr8k" ]]; then
-    CHECKPOINT_SUFFIX="flickr8k"
     DEFAULT_OUTPUT="${DALLE2_DIR}/generated_images/dalle2-flickr8k.png"
     if [[ "${DATA_DIR_WAS_SET}" == false ]]; then
         DATA_DIR="${DEFAULT_FLICKR8K_DIR}"
     fi
 elif [[ "${DATASET}" == "flickr30k" ]]; then
-    CHECKPOINT_SUFFIX="flickr30k"
     DEFAULT_OUTPUT="${DALLE2_DIR}/generated_images/dalle2-flickr30k.png"
     if [[ "${DATA_DIR_WAS_SET}" == false ]]; then
         DATA_DIR="${DEFAULT_FLICKR30K_DIR}"
     fi
 elif [[ "${DATASET}" == "all" ]]; then
-    CHECKPOINT_SUFFIX="all"
     DEFAULT_OUTPUT="${DALLE2_DIR}/generated_images/dalle2-all.png"
     if [[ "${DATA_DIR_WAS_SET}" == false ]]; then
         DATA_DIR="${DEFAULT_ALL_DATA_DIR}"
@@ -97,12 +100,8 @@ else
     echo "Unsupported dataset: ${DATASET}" >&2
     exit 1
 fi
-if [[ "${USING_PRETRAINED_CLIP}" == true ]]; then
-    CHECKPOINT_SUFFIX="${CHECKPOINT_SUFFIX}_preclip"
-fi
-DECODER_CHECKPOINT_SUFFIX="${CHECKPOINT_SUFFIX}"
-if [[ "${LARGE_UNET}" == true ]]; then
-    DECODER_CHECKPOINT_SUFFIX="${DECODER_CHECKPOINT_SUFFIX}_largeunet"
+if [[ -n "${RUN_NAME}" ]]; then
+    DEFAULT_OUTPUT="${DALLE2_DIR}/generated_images/${RUN_NAME}.png"
 fi
 
 CONDA_BASE="$(conda info --base)"
@@ -124,40 +123,27 @@ echo "Node: $(hostname)"
 echo "Started: $(date --iso-8601=seconds)"
 echo "Working directory: $(pwd)"
 echo "Conda environment: ${CONDA_DEFAULT_ENV}"
-echo "Dataset: ${DATASET}"
-echo "Using pretrained CLIP: ${USING_PRETRAINED_CLIP}"
-echo "Using large U-Net: ${LARGE_UNET}"
+if [[ -n "${RUN_NAME}" ]]; then
+    echo "Experiment: ${RUN_NAME} (configuration loaded from manifest)"
+else
+    echo "Dataset: ${DATASET}"
+    echo "Using pretrained CLIP: ${USING_PRETRAINED_CLIP}"
+    echo "Using large U-Net: ${LARGE_UNET}"
+fi
 echo "Additional arguments: ${USER_ARGS[*]}"
 
 if [[ "${CONDA_DEFAULT_ENV}" != "${CONDA_ENV_NAME}" ]]; then
     echo "Expected ${CONDA_ENV_NAME}, got ${CONDA_DEFAULT_ENV}" >&2
     exit 1
 fi
-if [[ ! -f "infer.py" ]]; then
-    echo "Inference script is missing: ${DALLE2_DIR}/infer.py" >&2
+if [[ ! -f "infer.py" || ! -f "config.py" ]]; then
+    echo "Inference or configuration script is missing in ${DALLE2_DIR}" >&2
     exit 1
 fi
 if [[ "${USING_PRETRAINED_CLIP}" == true && ! -d "${PRETRAINED_CLIP_DIR}" ]]; then
     echo "Pretrained CLIP directory is missing: ${PRETRAINED_CLIP_DIR}" >&2
     exit 1
 fi
-CHECKPOINTS=(
-    "${DALLE2_DIR}/trained_models/prior_${CHECKPOINT_SUFFIX}.pt"
-    "${DALLE2_DIR}/trained_models/decoder_${DECODER_CHECKPOINT_SUFFIX}.pt"
-)
-if [[ "${USING_PRETRAINED_CLIP}" == false ]]; then
-    CHECKPOINTS=(
-        "${DALLE2_DIR}/trained_models/clip_${CHECKPOINT_SUFFIX}.pt"
-        "${CHECKPOINTS[@]}"
-    )
-fi
-for checkpoint in "${CHECKPOINTS[@]}"; do
-    if [[ ! -s "${checkpoint}" ]]; then
-        echo "Required checkpoint is missing or empty: ${checkpoint}" >&2
-        exit 1
-    fi
-done
-
 mkdir -p "$(dirname "${DEFAULT_OUTPUT}")"
 
 "${PYTHON_EXECUTABLE}" --version
@@ -170,7 +156,6 @@ nvidia-smi
 # sbatch submit-dalle2-infer.sh --prompt "two dogs playing" \
 #   --num-images 8 --output generated_images/two-dogs.png
 srun "${PYTHON_EXECUTABLE}" infer.py \
-    --dataset "${DATASET}" \
     --device cuda \
     --output "${DEFAULT_OUTPUT}" \
     "${USER_ARGS[@]}"

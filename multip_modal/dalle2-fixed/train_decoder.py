@@ -4,14 +4,18 @@ from time import perf_counter
 
 import torch
 import torch.nn as nn
-from os.path import isfile
 from train_clip import train_clip
 from train_prior import train_prior
 from torch.utils.data import DataLoader
 from torch.optim import Adam, AdamW, lr_scheduler
-from dalle2_dataset import (
-    add_dataset_arguments,
+from config import (
+    add_config_arguments,
     config_from_args,
+    mark_training_stage_complete,
+    prepare_training_stage,
+    training_stage_is_complete,
+)
+from dalle2_dataset import (
     describe_dataset,
     get_test_set,
     get_train_set,
@@ -20,6 +24,10 @@ from model.decoder import Decoder, sample_plot_image
 from data.data_utils import get_schedule_values, forward_diffusion, tokenizer
 
 def train_decoder(config):
+    if not prepare_training_stage(
+        config, "decoder", config.decoder.model_location
+    ):
+        return
     train_set, mean, std = get_train_set(config, augment_data=config.decoder.augment_data)
     describe_dataset(train_set, "decoder train")
     train_loader = DataLoader(
@@ -216,6 +224,7 @@ def train_decoder(config):
             mask = sample_masks[None, (epoch % len(sample_masks))]
             sample_plot_image(config, caption, mask, schedule_values=schedule_values, decoder=decoder)
 
+    mark_training_stage_complete(config, "decoder", config.decoder.model_location)
     print(
         f"[Complete] Decoder training finished. Checkpoint: "
         f"{config.decoder.model_location}",
@@ -224,17 +233,20 @@ def train_decoder(config):
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Train the DALL-E 2 decoder stage")
-    add_dataset_arguments(parser)
+    add_config_arguments(parser)
     args = parser.parse_args()
     config = config_from_args(args)
 
-    if not config.using_pretrained_clip and not isfile(config.clip.model_location):
-        print("CLIP model has not been trained. Training CLIP...")
+    if (
+        not config.using_pretrained_clip
+        and not training_stage_is_complete(config.clip.model_location)
+    ):
+        print("CLIP stage is missing or incomplete. Training CLIP...")
         print("Using device: ", config.device, f"({torch.cuda.get_device_name(config.device)})" if config.device.type == "cuda" else "")
         train_clip(config)
 
-    if not isfile(config.prior.model_location):
-        print("Prior model has not been trained. Training Prior...")
+    if not training_stage_is_complete(config.prior.model_location):
+        print("Prior stage is missing or incomplete. Training Prior...")
         print("Using device: ", config.device, f"({torch.cuda.get_device_name(config.device)})" if config.device.type == "cuda" else "")
         train_prior(config)
 

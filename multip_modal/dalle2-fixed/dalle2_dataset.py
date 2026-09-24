@@ -12,7 +12,6 @@ the first caption deterministically.
 
 from __future__ import annotations
 
-import argparse
 from collections import Counter
 from pathlib import Path
 import random
@@ -24,7 +23,14 @@ import torchvision.transforms as T
 from torchvision.datasets import FashionMNIST
 from torchvision.transforms import InterpolationMode
 
-from data.FMNISTConfig import FMNISTConfig, configure_dataset
+from config import (
+    Dalle2Config,
+    FMNISTConfig,
+    add_config_arguments,
+    add_dataset_arguments,
+    config_from_args,
+    configure_dataset,
+)
 from data.data_utils import tokenizer
 
 
@@ -32,99 +38,6 @@ CAPTION_COLUMNS = tuple(f"caption_{index}" for index in range(5))
 CAPTION_CONTAINER_COLUMNS = ("caption", "captions", "sentences")
 MERGED_DATASET_VALIDATION_FRACTION = 0.05
 MERGED_DATASET_SPLIT_SEED = 42
-SUPPORTED_DATASETS = (
-    "fashion_mnist",
-    "flickr8k",
-    "flickr30k",
-    "all",
-)
-
-
-def _normalize_dataset_name(value: str) -> str:
-    """Accept convenient spellings while storing one canonical name."""
-    normalized = value.strip().lower().replace("-", "_")
-    aliases = {
-        "fashionmnist": "fashion_mnist",
-        "flick8k": "flickr8k",
-    }
-    return aliases.get(normalized, normalized)
-
-
-def add_dataset_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--dataset",
-        "--data",
-        dest="dataset",
-        type=_normalize_dataset_name,
-        choices=SUPPORTED_DATASETS,
-        default="flickr30k",
-        help=(
-            "Dataset to train on. 'all' combines only Flickr8k and "
-            "Flickr30k; use '--data fashionMNIST' for FashionMNIST alone "
-            "(default: flickr30k)."
-        ),
-    )
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Override the selected dataset directory. With --dataset all, "
-            "this is a root containing flickr8k/data and flickr30k/data."
-        ),
-    )
-    parser.add_argument(
-        "--device",
-        default=None,
-        help="Torch device such as cuda, cuda:0, or cpu.",
-    )
-    parser.add_argument(
-        "--using-pre-CLIP",
-        "--using-pre-clip",
-        dest="using_pretrained_clip",
-        action="store_true",
-        help=(
-            "Use a frozen local pretrained CLIP and skip CLIP training. "
-            "This creates separate *_preclip.pt checkpoints."
-        ),
-    )
-    parser.add_argument(
-        "--pretrained-clip-path",
-        type=Path,
-        default=Path("~/scratch/llms_model/clip-vit-base-patch32"),
-        help="Local Hugging Face CLIP directory (no network download).",
-    )
-    parser.add_argument(
-        "--large-UNet",
-        "--large-unet",
-        dest="large_unet",
-        action="store_true",
-        help=(
-            "Use the 64/128/256/512-channel decoder and a separate "
-            "*_largeunet.pt checkpoint."
-        ),
-    )
-
-
-def config_from_args(args: argparse.Namespace) -> FMNISTConfig:
-    config = FMNISTConfig()
-    config.using_pretrained_clip = args.using_pretrained_clip
-    config.pretrained_clip_path = str(args.pretrained_clip_path.expanduser())
-    config.large_unet = args.large_unet
-    config = configure_dataset(config, args.dataset, args.data_dir)
-    if args.device is not None:
-        config.device = torch.device(args.device)
-    if config.device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested, but PyTorch cannot see a GPU")
-    if config.using_pretrained_clip:
-        model_path = Path(config.pretrained_clip_path)
-        if not model_path.is_dir():
-            raise FileNotFoundError(
-                f"Pretrained CLIP directory does not exist: {model_path}"
-            )
-    return config
-
-
 def _image_transform(
     config,
     train: bool,
